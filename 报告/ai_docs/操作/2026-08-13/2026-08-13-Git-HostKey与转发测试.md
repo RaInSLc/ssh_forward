@@ -16,3 +16,4 @@
 6. 已实现首次 Host Key 自动确认保存：首次 Tunnel 启动扫描 ED25519 公钥并写入当前 Windows 用户 `known_hosts`；后续严格校验，Host Key 变更不自动覆盖。已在 README 说明该行为。
 7. 已通过受控验证建立本地 `127.0.0.1:12395` 到远端 `10.0.0.103:80` 的 SSH 转发，本地 HTTP 请求返回 `HTTP/1.1 200 OK`。密码未写入配置明文、命令输出或归档。
 8. 已增加 `.gitattributes` 统一文本文件使用 LF；忽略本地 OpenCode 运行日志。已修正非 22 端口 Host Key 的 known_hosts 查找格式。
+9. 已完成首个 Git 提交 `f10f970`（`Initial SSH forward application`），并成功推送至 `origin/main`。
