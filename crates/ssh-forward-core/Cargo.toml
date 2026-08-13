@@ -1,0 +1,11 @@
+[package]
+name = "ssh-forward-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ssh-forward-config = { path = "../ssh-forward-config" }
+ssh-forward-ssh = { path = "../ssh-forward-ssh" }
+thiserror.workspace = true
+uuid.workspace = true

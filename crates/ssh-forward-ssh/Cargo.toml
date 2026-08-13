@@ -1,0 +1,9 @@
+[package]
+name = "ssh-forward-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ssh-forward-config = { path = "../ssh-forward-config" }
+thiserror.workspace = true

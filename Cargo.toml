@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "apps/cli",
+    "apps/desktop/src-tauri",
+    "crates/ssh-forward-config",
+    "crates/ssh-forward-core",
+    "crates/ssh-forward-ssh",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["SSH Forward Contributors"]
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.53", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }

@@ -1,0 +1,19 @@
+[package]
+name = "ssh-forward-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+ssh-forward-config = { path = "../../../crates/ssh-forward-config" }
+ssh-forward-core = { path = "../../../crates/ssh-forward-core" }
+ssh-forward-ssh = { path = "../../../crates/ssh-forward-ssh" }
+tauri = { version = "2", features = [] }
+uuid.workspace = true
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }

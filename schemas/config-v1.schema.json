@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SSH Forward Configuration V1",
+  "type": "object",
+  "required": ["version", "settings", "hosts", "tunnels"],
+  "properties": {
+    "version": { "const": 1 },
+    "settings": {
+      "type": "object",
+      "required": ["strict_host_key_checking", "connect_timeout_seconds"],
+      "properties": {
+        "strict_host_key_checking": { "type": "boolean" },
+        "connect_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "hosts": { "type": "array", "items": { "$ref": "#/$defs/host" } },
+    "tunnels": { "type": "array", "items": { "$ref": "#/$defs/tunnel" } }
+  },
+  "$defs": {
+    "endpoint": {
+      "type": "object",
+      "required": ["host", "port"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "host": {
+      "type": "object",
+      "required": ["id", "name", "hostname", "port", "username", "auth", "enabled"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "hostname": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "username": { "type": "string", "minLength": 1 },
+        "auth": { "type": "object" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "tunnel": {
+      "type": "object",
+      "required": ["id", "name", "host_id", "type", "local", "remote", "auto_start", "auto_reconnect", "enabled"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "host_id": { "type": "string", "minLength": 1 },
+        "type": { "const": "local" },
+        "local": { "$ref": "#/$defs/endpoint" },
+        "remote": { "$ref": "#/$defs/endpoint" },
+        "auto_start": { "type": "boolean" },
+        "auto_reconnect": { "type": "boolean" },
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

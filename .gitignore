@@ -1,0 +1,22 @@
+# Sensitive runtime configuration and SSH trust data
+config.json
+known_hosts
+
+# Rust build output and project-local Cargo cache
+target/
+.cargo/
+
+# Desktop frontend dependencies and build output
+apps/desktop/node_modules/
+apps/desktop/dist/
+
+# AI helper build outputs
+报告/ai_codes/**/target/
+报告/ai_codes/**/Cargo.lock
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.opencode/loop-*.json*
+*.log
+Thumbs.db
