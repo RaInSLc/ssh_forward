@@ -115,6 +115,7 @@ pub fn add_tunnel(
     host_name: &str,
     local: Endpoint,
     remote: Endpoint,
+    auto_open_browser: bool,
 ) -> Result<Tunnel, CoreError> {
     let mut config = load(path)?;
     if config.tunnels.iter().any(|tunnel| tunnel.name == name) {
@@ -138,6 +139,7 @@ pub fn add_tunnel(
         remote,
         auto_start: false,
         auto_reconnect: true,
+        auto_open_browser,
         enabled: true,
     };
     config.tunnels.push(tunnel.clone());

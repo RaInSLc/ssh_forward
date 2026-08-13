@@ -88,6 +88,7 @@ mod tests {
             remote: Endpoint::localhost(3306),
             auto_start: false,
             auto_reconnect: true,
+            auto_open_browser: false,
             enabled: true,
         });
         assert!(validate(&config).is_err());

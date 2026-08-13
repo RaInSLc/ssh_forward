@@ -185,6 +185,7 @@ fn run(cli: Cli) -> Result<()> {
                 &arguments.host,
                 arguments.local,
                 arguments.remote,
+                false,
             )?;
             println!("Added tunnel '{}' ({})", tunnel.name, tunnel.id);
         }

@@ -63,6 +63,7 @@ struct TunnelInput {
     local_port: u16,
     remote_host: String,
     remote_port: u16,
+    auto_open_browser: bool,
 }
 
 use serde::Deserialize;
@@ -134,6 +135,25 @@ fn ensure_host_key(hostname: &str, port: u16) -> Result<(), String> {
         file.write_all(b"\n")
             .map_err(|error| format!("无法完成 SSH Host Key 写入：{error}"))?;
     }
+    Ok(())
+}
+
+fn local_browser_url(tunnel: &Tunnel) -> Result<String, String> {
+    if tunnel.local.host != "127.0.0.1" && tunnel.local.host != "localhost" {
+        return Err("仅支持用浏览器打开本地绑定地址".into());
+    }
+    Ok(format!(
+        "http://{}:{}",
+        tunnel.local.host, tunnel.local.port
+    ))
+}
+
+fn open_in_browser(tunnel: &Tunnel) -> Result<(), String> {
+    let url = local_browser_url(tunnel)?;
+    Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn()
+        .map_err(|error| format!("无法打开系统默认浏览器：{error}"))?;
     Ok(())
 }
 
@@ -375,6 +395,7 @@ fn create_tunnel(input: TunnelInput, state: State<'_, AppState>) -> Result<Tunne
             host: input.remote_host,
             port: input.remote_port,
         },
+        input.auto_open_browser,
     )
     .map_err(|error| error.to_string())
 }
@@ -417,6 +438,7 @@ fn edit_tunnel(
             },
             auto_start: existing.auto_start,
             auto_reconnect: existing.auto_reconnect,
+            auto_open_browser: input.auto_open_browser,
             enabled: existing.enabled,
         },
         &input.host_name,
@@ -491,6 +513,9 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
                         message: None,
                     },
                 );
+            if tunnel.auto_open_browser {
+                open_in_browser(tunnel)?;
+            }
             Ok(())
         }
         Err(error) => {
@@ -509,6 +534,17 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
             Err(message)
         }
     }
+}
+
+#[tauri::command]
+fn open_tunnel_in_browser(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    let config = snapshot(&state)?.config;
+    let tunnel = config
+        .tunnels
+        .iter()
+        .find(|tunnel| tunnel.name == name)
+        .ok_or("未找到 Tunnel")?;
+    open_in_browser(tunnel)
 }
 
 #[tauri::command]
@@ -553,6 +589,7 @@ fn main() {
             edit_tunnel,
             delete_tunnel,
             start_tunnel,
+            open_tunnel_in_browser,
             stop_tunnel
         ])
         .run(tauri::generate_context!())

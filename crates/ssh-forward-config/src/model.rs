@@ -100,6 +100,8 @@ pub struct Tunnel {
     pub auto_start: bool,
     #[serde(default = "default_true")]
     pub auto_reconnect: bool,
+    #[serde(default)]
+    pub auto_open_browser: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

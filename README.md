@@ -106,6 +106,10 @@ DPAPI 密文只能由保存密码的 Windows 用户在原机器上解密。编�
 
 首次启动某个 Host 的 Tunnel 时，桌面端会自动执行与 OpenSSH 输入 `yes` 相同的确认流程：获取并保存服务器的 ED25519 Host Key 到当前 Windows 用户的 `~/.ssh/known_hosts`，然后继续严格校验连接。后续连接仍使用严格校验；若服务器 Host Key 发生变化，程序会拒绝连接，不会自动覆盖原记录。
 
+### 浏览器与主题
+
+Tunnel 卡片提供“打开浏览器”按钮，会使用系统默认浏览器访问本地转发的 HTTP 地址。编辑 Tunnel 时可勾选“启动成功后自动打开浏览器”；旧 Tunnel 默认关闭该选项。页头可在日间模式和夜间模式之间切换，选择保存在当前设备的桌面端本地存储中。
+
 ## 桌面端 GUI
 
 桌面端位于 `apps/desktop`，基于 Tauri 2、React 和 TypeScript。它与 CLI 复用相同的 Rust 配置和 Core 模块，可查看、校验和管理 Host 及 Local Tunnel 配置。

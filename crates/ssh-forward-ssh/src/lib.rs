@@ -155,6 +155,7 @@ mod tests {
             remote: Endpoint::localhost(8080),
             auto_start: false,
             auto_reconnect: true,
+            auto_open_browser: false,
             enabled: true,
         };
         let args = openssh_arguments(&settings, &host, &tunnel);
