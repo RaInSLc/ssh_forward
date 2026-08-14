@@ -16,7 +16,7 @@ use ssh_forward_core::{
     update_host, update_tunnel,
 };
 use ssh_forward_ssh::OpenSshForward;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::LocalFree,
@@ -80,10 +80,20 @@ fn config_path(state: &AppState) -> Result<PathBuf, String> {
         .map_err(|_| "配置路径锁不可用".into())
 }
 
-fn default_config_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+#[cfg(debug_assertions)]
+fn default_config_path(_app: &AppHandle) -> Result<PathBuf, String> {
+    // Keep local development data next to the workspace for easy inspection.
+    Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("config.json")
+        .join("config.json"))
+}
+
+#[cfg(not(debug_assertions))]
+fn default_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|path| path.join("config.json"))
+        .map_err(|error| format!("无法定位应用配置目录：{error}"))
 }
 
 fn known_hosts_path() -> Result<PathBuf, String> {
@@ -597,10 +607,15 @@ fn stop_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
-        .manage(AppState {
-            config_path: Mutex::new(default_config_path()),
-            forwards: Mutex::new(HashMap::new()),
-            statuses: Mutex::new(HashMap::new()),
+        .setup(|app| {
+            app.manage(AppState {
+                config_path: Mutex::new(
+                    default_config_path(app.handle()).map_err(std::io::Error::other)?,
+                ),
+                forwards: Mutex::new(HashMap::new()),
+                statuses: Mutex::new(HashMap::new()),
+            });
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
