@@ -1,180 +1,125 @@
 # SSH Forward
 
-`ssh-forward` 是一个使用 Rust 编写的命令行基础工具，用于管理安全的本地 SSH 端口转发。本次初始实现遵循项目设计中“核心优先”的开发顺序：JSON 配置、配置校验、Host 与 Local Tunnel 的增删改查，以及兼容 OpenSSH 的本地转发。
+SSH Forward 是一个桌面端 SSH 本地端口转发工具。通过图形界面保存服务器和 Tunnel 配置，启动后将本机端口安全地转发到远端服务。
 
-## 当前功能范围
+## 下载
 
-- 使用严格、带版本号的 JSON 配置，并通过原子写入降低配置损坏风险。
-- 支持使用 SSH Agent 或私钥路径管理 Host 的增删改查；配置中不会保存密码或私钥内容。
-- 支持 Local（`-L`）Tunnel 的增删改查，仅允许绑定回环地址，并会在启动前检查本地端口可用性。
-- 通过 OpenSSH 创建转发，默认使用 `ExitOnForwardFailure=yes` 与 `StrictHostKeyChecking=yes`。
+前往 [Releases](https://github.com/RaInSLc/ssh_forward/releases) 下载最新版本。
 
-桌面端界面、系统托盘、内嵌 SSH 后端、系统凭据库、远程/动态转发、自动重连运行时和守护进程属于后续工作。
+| 平台 | 安装版 | 便携版 |
+| --- | --- | --- |
+| Windows x64 | `.msi` 或 `-setup.exe` | `-x64-portable.zip` |
+| macOS Intel | `.dmg` | `-macos-x64-portable.zip` |
+| macOS Apple Silicon | `.dmg` | `-macos-aarch64-portable.zip` |
 
-## 环境要求
+安装版适合长期使用，会由系统安装程序完成安装。便携版解压后即可运行，不写入系统安装目录。
 
-- Rust 工具链（当前已使用 Rust 1.96+ 与 Cargo）。
-- Node.js 22+ 与 npm 10+，仅桌面端开发和打包需要。
-- Windows 桌面端还需要 WebView2 Runtime 与 Visual Studio C++ Build Tools（包含 MSVC 和 Windows SDK）。
-- 可选：Windows OpenSSH。CLI 的实际 Local Tunnel 启动会调用系统 `ssh.exe`。
+Windows 用户可任选 MSI 或 Setup EXE。Apple Silicon 对应 M 系列芯片；较早的 Intel Mac 请选择 macOS x64 包。
 
-以下命令均以项目根目录为当前目录：
+## 快速开始
 
-```powershell
-Set-Location E:\IdeaProjects\pythonProject\ssh_forward
+首次使用按以下顺序操作：
+
+1. 启动 SSH Forward。
+2. 在左侧点击“添加服务器”。
+3. 填写服务器名称、SSH 地址、SSH 端口和用户名，选择认证方式后保存。
+4. 点击右上角“新建 Tunnel”。
+5. 选择服务器，填写本地地址和端口，以及远端地址和端口后保存。
+6. 在 Tunnel 卡片点击“启动”。状态显示“运行中”后即可通过本地地址访问远端服务。
+
+例如，将本地 `127.0.0.1:12395` 转发到远端 `127.0.0.1:80` 后，在浏览器中访问：
+
+```text
+http://127.0.0.1:12395
 ```
 
-项目将 Cargo 下载缓存写入根目录 `.cargo`，避免使用当前用户目录作为项目构建缓存：
+## 添加服务器
 
-```powershell
-$env:CARGO_HOME = "$PWD\.cargo"
+左侧服务器列表显示已保存的服务器。点击已有服务器可编辑；点击“添加服务器”可创建新服务器。
+
+需要填写：
+
+- 名称：用于在 Tunnel 中选择服务器。
+- 服务器地址：SSH 主机名或 IP 地址。
+- SSH 端口：通常为 `22`。
+- 用户名：远端 SSH 用户名。
+- 认证方式：SSH Agent、私钥或密码。
+
+### 认证方式
+
+| 方式 | 使用方法 |
+| --- | --- |
+| SSH Agent | 使用系统已加载的 SSH 密钥。 |
+| 私钥 | 填写本机私钥文件路径。 |
+| 密码 | 输入 SSH 密码后保存。Windows 会加密保存密码。 |
+
+Windows 密码配置只能在保存该配置的同一 Windows 用户和同一设备上使用。macOS 当前请使用 SSH Agent 或私钥认证。
+
+首次连接未知服务器时，应用会保存该服务器的 Host Key。后续连接会继续校验；如果服务器 Host Key 变化，Tunnel 会拒绝启动。
+
+## 创建 Tunnel
+
+点击“新建 Tunnel”，然后填写：
+
+- 名称：便于识别该转发，例如 `web`、`database`。
+- 服务器：选择刚刚添加的 SSH 服务器。
+- 本地地址与端口：本机监听地址。通常使用 `127.0.0.1`。
+- 远端地址与端口：通过 SSH 服务器可访问的目标服务。
+- 启动成功后自动打开浏览器：适用于 HTTP 服务，按需勾选。
+
+Tunnel 卡片会显示：
+
+```text
+本地地址:端口 → 远端地址:端口
 ```
 
-## 首次准备
+为避免把服务暴露到局域网，本地地址应使用 `127.0.0.1` 或 `localhost`。
 
-CLI 不需要 npm 依赖。使用桌面端前，安装项目内前端与 Tauri CLI 依赖：
+## 使用 Tunnel
 
-```powershell
-Set-Location apps\desktop
-npm install
-Set-Location ..\..
-```
+每个 Tunnel 卡片提供以下操作：
 
-依赖将写入 `apps/desktop/node_modules`，锁定版本记录在 `apps/desktop/package-lock.json`。
+- 启动：建立 SSH 本地转发。
+- 停止：关闭该转发。
+- 打开浏览器：在 Tunnel 运行中，用系统默认浏览器打开本地 HTTP 地址。
+- 编辑：修改服务器、地址、端口或自动打开浏览器选项。编辑运行中的 Tunnel 前请先停止它。
 
-## CLI 编译与启动
+状态含义：
 
-### Debug 编译
+| 状态 | 含义 |
+| --- | --- |
+| 已停止 | 未建立转发。 |
+| 运行中 | 本地端口已由 SSH Tunnel 接管。 |
+| 错误 | 启动失败，请查看卡片显示的错误信息。 |
 
-```powershell
-$env:CARGO_HOME = "$PWD\.cargo"
-cargo build -p ssh-forward
-```
+常见启动失败原因包括：本地端口已被占用、服务器不可达、认证失败、Host Key 不匹配或远端服务地址不可访问。
 
-生成的可执行文件为 `target\debug\ssh-forward.exe`。直接运行：
+退出 SSH Forward 会停止由当前程序启动的 Tunnel。
 
-```powershell
-.\target\debug\ssh-forward.exe --help
-```
+## 浏览器与主题
 
-也可以由 Cargo 编译并启动：
+- Tunnel 运行中可点击“打开浏览器”。
+- 创建或编辑 Tunnel 时，勾选“启动成功后自动打开浏览器”，每次启动成功后会自动访问本地 HTTP 地址。
+- 点击右上角“夜间模式”或“日间模式”切换界面主题，选择会在当前设备保留。
 
-```powershell
-$env:CARGO_HOME = "$PWD\.cargo"
-cargo run -p ssh-forward -- --help
-```
+## 配置文件
 
-### Release 编译
+应用默认在程序工作目录使用 `config.json` 保存服务器与 Tunnel 配置。
 
-```powershell
-$env:CARGO_HOME = "$PWD\.cargo"
-cargo build -p ssh-forward --release
-```
+- 请妥善保管该文件，不要提交到 Git 仓库或分享给他人。
+- 如需迁移配置，请在目标设备重新填写密码认证的服务器密码。
+- 建议在修改大量 Tunnel 前备份 `config.json`。
 
-Release 可执行文件为 `target\release\ssh-forward.exe`。
+## 系统要求
 
-### CLI 使用示例
+- Windows：需要系统 OpenSSH；通常随 Windows 可选功能提供。
+- Windows：需要 WebView2 Runtime，现代 Windows 通常已内置。
+- macOS：使用系统自带 OpenSSH。
 
-除非通过 `--config` 指定配置文件，否则 CLI 使用当前工作目录的 `config.json`。
+macOS 应用当前未进行 Apple Developer 签名和公证。首次打开时如被系统拦截，请在“系统设置 - 隐私与安全性”中确认打开。
 
-```powershell
-.\target\debug\ssh-forward.exe host add development --host ssh.example.invalid --user developer
-.\target\debug\ssh-forward.exe tunnel add jupyter --host development --local 127.0.0.1:18888 --remote 127.0.0.1:8888
-.\target\debug\ssh-forward.exe config validate
-.\target\debug\ssh-forward.exe start jupyter
-```
+## 自动发布
 
-使用 `host add` 时可通过 `--key path\to\private_key` 指定私钥路径；省略该参数时使用 SSH Agent。`start` 会在前台运行；按 `Ctrl+C` 可终止 OpenSSH 子进程。仓库不包含实际 SSH 目标主机；`examples/config.json` 使用不可路由的示例地址，可安全查看和校验。
+推送 `v*` 格式的 Git 标签会触发 GitHub Actions，在 Windows、macOS Intel 和 macOS Apple Silicon 上构建并发布安装版与便携版资产。
 
-## 配置
-
-JSON Schema 参考文件位于 `schemas/config-v1.schema.json`，安全的代表性配置示例位于 `examples/config.json`。
-
-V0.1 仅接受 `local` 类型的 Tunnel，本地绑定地址必须为 `127.0.0.1` 或 `::1`，以防止意外暴露给局域网中的其他设备。
-
-### 认证与密码安全
-
-添加或编辑服务器时可选择 SSH Agent、私钥路径或密码认证。
-
-- SSH Agent 不保存认证秘密。
-- 私钥认证只保存私钥文件路径，不保存私钥内容或口令。
-- Windows 上的密码认证使用 DPAPI 加密后保存到 `config.json` 的 `auth.encrypted_password` 字段；文件中不保存明文密码。
-
-DPAPI 密文只能由保存密码的 Windows 用户在原机器上解密。编辑使用密码认证的服务器时，密码输入框留空会保留已有密文；输入新密码会重新加密并替换密文。旧版本只保存 `credential_id` 的密码服务器无法恢复密码，请编辑服务器并重新输入一次密码完成迁移。
-
-### Host Key 确认
-
-首次启动某个 Host 的 Tunnel 时，桌面端会自动执行与 OpenSSH 输入 `yes` 相同的确认流程：获取并保存服务器的 ED25519 Host Key 到当前 Windows 用户的 `~/.ssh/known_hosts`，然后继续严格校验连接。后续连接仍使用严格校验；若服务器 Host Key 发生变化，程序会拒绝连接，不会自动覆盖原记录。
-
-### 浏览器与主题
-
-Tunnel 卡片提供“打开浏览器”按钮，会使用系统默认浏览器访问本地转发的 HTTP 地址。编辑 Tunnel 时可勾选“启动成功后自动打开浏览器”；旧 Tunnel 默认关闭该选项。页头可在日间模式和夜间模式之间切换，选择保存在当前设备的桌面端本地存储中。
-
-## 桌面端 GUI
-
-桌面端位于 `apps/desktop`，基于 Tauri 2、React 和 TypeScript。它与 CLI 复用相同的 Rust 配置和 Core 模块，可查看、校验和管理 Host 及 Local Tunnel 配置。
-
-### 开发启动（热更新）
-
-首次安装 npm 依赖后，在桌面端目录运行项目内 Tauri CLI：
-
-```powershell
-Set-Location apps\desktop
-.\node_modules\.bin\tauri.cmd dev
-```
-
-该命令会自动启动 Vite 开发服务器（`127.0.0.1:1420`）并打开桌面窗口；修改 React、TypeScript 或 CSS 后会热更新。按 `Ctrl+C` 停止开发服务器和桌面进程。
-
-### Release 编译与 Windows 打包
-
-以下命令构建可直接运行、加载本地前端资源的桌面端可执行程序：
-
-```powershell
-Set-Location apps\desktop
-.\node_modules\.bin\tauri.cmd build --no-bundle
-Set-Location ..\..
-```
-
-可执行文件位于 `target\release\ssh-forward-desktop.exe`，可直接启动：
-
-```powershell
-.\target\release\ssh-forward-desktop.exe
-```
-
-不要直接双击 `target\debug\ssh-forward-desktop.exe`，它是开发构建，要求 `http://localhost:1420` 上的 Vite 服务正在运行。需要热更新开发时，请使用上一节的 `tauri.cmd dev` 命令。
-
-若要生成 Windows 安装包，在 `apps\desktop` 目录执行：
-
-```powershell
-.\node_modules\.bin\tauri.cmd build
-```
-
-Tauri 会先运行 `npm run build`，再生成安装包。输出位置由 Tauri 决定，通常位于 `target\release\bundle\` 下；打包前请确认 Windows 的 WebView2 Runtime 和 MSVC 工具链可用。
-
-### GitHub Actions 发布
-
-推送 `v*` 格式的 Git 标签会触发 GitHub Actions：Windows Runner 构建 MSI、NSIS 和免安装 ZIP；macOS Intel 与 Apple Silicon Runner 分别构建 DMG 和 `.app` 免安装 ZIP。通过全部检查后，工作流会发布 GitHub Release。工作流使用仓库提供的 `GITHUB_TOKEN`，不需要在本机上传资产或保存个人令牌。
-
-对于工作流加入前已存在的标签，在仓库的 Actions 页面选择 `Release desktop app`，点击 `Run workflow`，输入标签（例如 `v0.1.1`）即可使用同一 CI 流程补发 Release。
-
-桌面端默认读取项目根目录的 `config.json`，也可以通过界面顶部的“配置文件”输入框切换。当前 GUI 不会启动或显示虚假的 Tunnel 运行状态；完整的后台运行时、连接复用与自动重连仍在后续实现范围内。
-
-GUI 中可以新建、编辑、启动、停止或删除 Local Tunnel。启动后状态由当前 GUI 进程管理；退出 GUI 会停止该 GUI 启动的 OpenSSH 子进程。认证失败、Host Key 拒绝、网络连接失败或端口冲突时，Tunnel 卡片会显示错误状态和错误信息。
-
-## 检查与测试
-
-在项目根目录执行 Rust 检查：
-
-```powershell
-$env:CARGO_HOME = "$PWD\.cargo"
-cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-```
-
-在 `apps\desktop` 目录执行前端检查与生产构建：
-
-```powershell
-npm run check
-npm run build
-```
+发布完成后可在 [Releases](https://github.com/RaInSLc/ssh_forward/releases) 下载对应文件。
