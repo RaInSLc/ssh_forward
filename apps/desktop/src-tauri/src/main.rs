@@ -5,6 +5,7 @@ use std::{
     sync::Mutex,
 };
 
+#[cfg(windows)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use ssh_forward_config::{Auth, AuthType, Config, Endpoint, Host, Tunnel, load, validate};
@@ -14,6 +15,7 @@ use ssh_forward_core::{
 };
 use ssh_forward_ssh::OpenSshForward;
 use tauri::State;
+#[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::LocalFree,
     Security::Cryptography::{
@@ -150,13 +152,22 @@ fn local_browser_url(tunnel: &Tunnel) -> Result<String, String> {
 
 fn open_in_browser(tunnel: &Tunnel) -> Result<(), String> {
     let url = local_browser_url(tunnel)?;
+    #[cfg(windows)]
     Command::new("cmd")
         .args(["/C", "start", "", &url])
         .spawn()
         .map_err(|error| format!("无法打开系统默认浏览器：{error}"))?;
+    #[cfg(target_os = "macos")]
+    Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|error| format!("无法打开系统默认浏览器：{error}"))?;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return Err("当前平台尚不支持打开系统默认浏览器".into());
     Ok(())
 }
 
+#[cfg(windows)]
 fn protect_password(password: &str) -> Result<String, String> {
     let mut input = password.as_bytes().to_vec();
     let input_blob = CRYPT_INTEGER_BLOB {
@@ -186,6 +197,12 @@ fn protect_password(password: &str) -> Result<String, String> {
     Ok(STANDARD.encode(encrypted))
 }
 
+#[cfg(not(windows))]
+fn protect_password(_password: &str) -> Result<String, String> {
+    Err("当前版本仅支持 Windows 的密码认证；请使用 SSH Agent 或私钥".into())
+}
+
+#[cfg(windows)]
 fn unprotect_password(value: &str) -> Result<String, String> {
     let mut encrypted = STANDARD.decode(value).map_err(|_| "密码密文格式无效")?;
     let input_blob = CRYPT_INTEGER_BLOB {
@@ -215,7 +232,12 @@ fn unprotect_password(value: &str) -> Result<String, String> {
     String::from_utf8(password).map_err(|_| "解密后的密码不是有效 UTF-8".into())
 }
 
-#[cfg(test)]
+#[cfg(not(windows))]
+fn unprotect_password(_value: &str) -> Result<String, String> {
+    Err("当前版本仅支持 Windows 的密码认证；请使用 SSH Agent 或私钥".into())
+}
+
+#[cfg(all(test, windows))]
 mod tests {
     use super::{protect_password, unprotect_password};
 

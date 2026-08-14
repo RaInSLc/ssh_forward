@@ -153,7 +153,7 @@ Tauri 会先运行 `npm run build`，再生成安装包。输出位置由 Tauri 
 
 ### GitHub Actions 发布
 
-推送 `v*` 格式的 Git 标签会触发 GitHub Actions，在 Windows Runner 上完成检查、构建 MSI/NSIS 安装包并发布 GitHub Release。工作流使用仓库提供的 `GITHUB_TOKEN`，不需要在本机上传资产或保存个人令牌。
+推送 `v*` 格式的 Git 标签会触发 GitHub Actions：Windows Runner 构建 MSI、NSIS 和免安装 ZIP；macOS Intel 与 Apple Silicon Runner 分别构建 DMG 和 `.app` 免安装 ZIP。通过全部检查后，工作流会发布 GitHub Release。工作流使用仓库提供的 `GITHUB_TOKEN`，不需要在本机上传资产或保存个人令牌。
 
 对于工作流加入前已存在的标签，在仓库的 Actions 页面选择 `Release desktop app`，点击 `Run workflow`，输入标签（例如 `v0.1.1`）即可使用同一 CI 流程补发 Release。
 

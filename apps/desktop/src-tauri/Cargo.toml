@@ -16,4 +16,6 @@ ssh-forward-core = { path = "../../../crates/ssh-forward-core" }
 ssh-forward-ssh = { path = "../../../crates/ssh-forward-ssh" }
 tauri = { version = "2", features = [] }
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
