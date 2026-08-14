@@ -78,6 +78,12 @@ impl OpenSshForward {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
         if let Some(password) = password {
             command.env("SSH_ASKPASS", askpass.as_ref().expect("askpass exists"));
             command.env("SSH_ASKPASS_REQUIRE", "force");

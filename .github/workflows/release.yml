@@ -81,6 +81,15 @@ jobs:
           $version = $env:RELEASE_TAG.TrimStart('v')
           Compress-Archive -Path target/release/ssh-forward-desktop.exe -DestinationPath "target/release/bundle/ssh-forward_${version}_x64-portable.zip"
 
+      - name: Stage Windows release assets
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Copy-Item target/release/bundle/msi/*.msi release-assets/
+          Copy-Item target/release/bundle/nsis/*-setup.exe release-assets/
+          Copy-Item target/release/bundle/*-portable.zip release-assets/
+
       - name: Create macOS portable archive
         if: runner.os == 'macOS'
         shell: bash
@@ -91,15 +100,21 @@ jobs:
           echo "Creating portable archive from: $app_path"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "target/release/bundle/ssh-forward_${version}_${{ matrix.artifact }}-portable.zip"
 
+      - name: Stage macOS release assets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find target/release/bundle -type f -name '*.dmg' -exec cp {} release-assets/ \;
+          find target/release/bundle -type f -name '*-portable.zip' -exec cp {} release-assets/ \;
+          test -n "$(find release-assets -type f -name '*.dmg' -print -quit)"
+          test -n "$(find release-assets -type f -name '*-portable.zip' -print -quit)"
+
       - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            target/release/bundle/**/*.msi
-            target/release/bundle/**/*-setup.exe
-            target/release/bundle/**/*.dmg
-            target/release/bundle/*-portable.zip
+          path: release-assets/*
           if-no-files-found: error
 
   release:
