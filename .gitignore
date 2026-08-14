@@ -10,13 +10,17 @@ target/
 apps/desktop/node_modules/
 apps/desktop/dist/
 
-# AI helper build outputs
-报告/ai_codes/**/target/
-报告/ai_codes/**/Cargo.lock
+# Local AI workspace records and helper code
+报告/ai_codes/
+报告/ai_docs/
+.opencode/
+AGENTS.md
+agent.md
 
+# Tauri generates these schemas during builds
+apps/desktop/src-tauri/gen/
 # Editor and operating-system files
 .idea/
 .vscode/
-.opencode/loop-*.json*
 *.log
 Thumbs.db
