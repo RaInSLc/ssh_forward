@@ -151,6 +151,12 @@ Set-Location ..\..
 
 Tauri 会先运行 `npm run build`，再生成安装包。输出位置由 Tauri 决定，通常位于 `target\release\bundle\` 下；打包前请确认 Windows 的 WebView2 Runtime 和 MSVC 工具链可用。
 
+### GitHub Actions 发布
+
+推送 `v*` 格式的 Git 标签会触发 GitHub Actions，在 Windows Runner 上完成检查、构建 MSI/NSIS 安装包并发布 GitHub Release。工作流使用仓库提供的 `GITHUB_TOKEN`，不需要在本机上传资产或保存个人令牌。
+
+对于工作流加入前已存在的标签，在仓库的 Actions 页面选择 `Release desktop app`，点击 `Run workflow`，输入标签（例如 `v0.1.1`）即可使用同一 CI 流程补发 Release。
+
 桌面端默认读取项目根目录的 `config.json`，也可以通过界面顶部的“配置文件”输入框切换。当前 GUI 不会启动或显示虚假的 Tunnel 运行状态；完整的后台运行时、连接复用与自动重连仍在后续实现范围内。
 
 GUI 中可以新建、编辑、启动、停止或删除 Local Tunnel。启动后状态由当前 GUI 进程管理；退出 GUI 会停止该 GUI 启动的 OpenSSH 子进程。认证失败、Host Key 拒绝、网络连接失败或端口冲突时，Tunnel 卡片会显示错误状态和错误信息。
