@@ -13,6 +13,7 @@ apps/desktop/dist/
 # Local AI workspace records and helper code
 报告/ai_codes/
 报告/ai_docs/
+
 .opencode/
 AGENTS.md
 agent.md
