@@ -23,7 +23,7 @@ jobs:
           - os: windows-latest
             artifact: windows-x64
             bundle: msi nsis
-          - os: macos-13
+          - os: macos-15-intel
             artifact: macos-x64
             bundle: dmg
           - os: macos-14
