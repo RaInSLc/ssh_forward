@@ -86,7 +86,10 @@ jobs:
         shell: bash
         run: |
           version="${RELEASE_TAG#v}"
-          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/SSH Forward.app" "target/release/bundle/ssh-forward_${version}_${{ matrix.artifact }}-portable.zip"
+          app_path="$(find target/release/bundle -type d -name '*.app' -print -quit)"
+          test -n "$app_path"
+          echo "Creating portable archive from: $app_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "target/release/bundle/ssh-forward_${version}_${{ matrix.artifact }}-portable.zip"
 
       - name: Upload release assets
         uses: actions/upload-artifact@v4
