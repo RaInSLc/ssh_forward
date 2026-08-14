@@ -22,7 +22,7 @@ jobs:
         include:
           - os: windows-latest
             artifact: windows-x64
-            bundle: all
+            bundle: msi nsis
           - os: macos-13
             artifact: macos-x64
             bundle: dmg
@@ -55,11 +55,14 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
-      - name: Verify Rust workspace
-        run: |
-          cargo fmt --all -- --check
-          cargo test --workspace
-          cargo clippy --workspace -- -D warnings
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Run Rust Clippy
+        run: cargo clippy --workspace -- -D warnings
 
       - name: Verify frontend
         working-directory: apps/desktop
