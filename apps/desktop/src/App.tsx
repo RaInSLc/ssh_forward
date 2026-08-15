@@ -52,7 +52,7 @@ type TunnelForm = {
   autoOpenBrowser: boolean;
 };
 
-const version = "0.1.9";
+const version = "0.1.10";
 const repositoryUrl = "https://github.com/RaInSLc/ssh_forward";
 const newHost = (): HostForm => ({
   name: "",
@@ -114,6 +114,44 @@ export default function App() {
       return message;
     }
   };
+  const deleteHost = async (name: string) => {
+    const host = snapshot?.config.hosts.find((item) => item.name === name);
+    if (host) {
+      const boundTunnels = (snapshot?.config.tunnels ?? []).filter(
+        (t) => t.host_id === host.id
+      );
+      if (boundTunnels.length > 0) {
+        setFormError(
+          `无法删除服务器：仍有 ${boundTunnels.length} 个 Tunnel 关联到此服务器，请先删除对应的 Tunnel。`
+        );
+        return;
+      }
+    }
+    if (!window.confirm(`确定要删除服务器“${name}”吗？`)) {
+      return;
+    }
+    const error = await action("delete_host", { name });
+    if (error) {
+      setFormError(`无法删除服务器：${error}`);
+    } else {
+      setPanel(null);
+      setHostEditing(null);
+      setHostForm(newHost());
+    }
+  };
+  const deleteTunnel = async (name: string) => {
+    if (!window.confirm(`确定要删除 Tunnel“${name}”吗？`)) {
+      return;
+    }
+    const error = await action("delete_tunnel", { name });
+    if (error) {
+      setFormError(`无法删除 Tunnel：${error}`);
+    } else {
+      setPanel(null);
+      setTunnelEditing(null);
+      setTunnelForm(newTunnel());
+    }
+  };
   const saveHost = async (event: FormEvent) => {
     event.preventDefault();
     setFormError("");
@@ -125,7 +163,7 @@ export default function App() {
     };
     const error = await action(
       hostEditing ? "edit_host" : "create_host",
-      hostEditing ? { originalName: hostEditing, input } : { input },
+      hostEditing ? { originalName: hostEditing, input } : { input }
     );
     if (error) {
       setFormError(`无法保存服务器：${error}`);
@@ -145,7 +183,7 @@ export default function App() {
     };
     const error = await action(
       tunnelEditing ? "edit_tunnel" : "create_tunnel",
-      tunnelEditing ? { originalName: tunnelEditing, input } : { input },
+      tunnelEditing ? { originalName: tunnelEditing, input } : { input }
     );
     if (error) {
       setFormError(`无法保存 Tunnel：${error}`);
@@ -176,7 +214,7 @@ export default function App() {
             privateKey: host.auth.private_key ?? "",
             password: "",
           }
-        : newHost(),
+        : newHost()
     );
     setPanel("host");
   };
@@ -195,7 +233,7 @@ export default function App() {
             remotePort: tunnel.remote.port,
             autoOpenBrowser: tunnel.auto_open_browser,
           }
-        : newTunnel(),
+        : newTunnel()
     );
     setPanel("tunnel");
   };
@@ -310,10 +348,17 @@ export default function App() {
                     {running ? "停止" : "启动"}
                   </button>
                   <button onClick={() => openTunnel(tunnel)}>编辑</button>
+                  <button
+                    className="danger-link"
+                    onClick={() => void deleteTunnel(tunnel.name)}
+                  >
+                    删除
+                  </button>
                 </div>
               </article>
             );
           })}
+
           {!tunnels.length && (
             <div className="zero">
               <h2>还没有 Tunnel</h2>
@@ -389,7 +434,23 @@ export default function App() {
                 {formError}
               </p>
             )}
-            <button className="primary submit">保存</button>
+            <div className="form-actions">
+              {hostEditing && (
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => void deleteHost(hostEditing)}
+                >
+                  删除服务器
+                </button>
+              )}
+              <button
+                className="primary submit"
+                style={{ marginLeft: hostEditing ? "0" : "auto" }}
+              >
+                保存
+              </button>
+            </div>
           </form>
         </Modal>
       )}
@@ -475,7 +536,23 @@ export default function App() {
                 {formError}
               </p>
             )}
-            <button className="primary submit">保存</button>
+            <div className="form-actions">
+              {tunnelEditing && (
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => void deleteTunnel(tunnelEditing)}
+                >
+                  删除 Tunnel
+                </button>
+              )}
+              <button
+                className="primary submit"
+                style={{ marginLeft: tunnelEditing ? "0" : "auto" }}
+              >
+                保存
+              </button>
+            </div>
           </form>
         </Modal>
       )}

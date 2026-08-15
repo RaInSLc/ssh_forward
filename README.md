@@ -104,11 +104,37 @@ Tunnel 卡片会显示：
 
 ## 配置文件
 
-应用默认在程序工作目录使用 `config.json` 保存服务器与 Tunnel 配置。
-
-- 请妥善保管该文件，不要提交到 Git 仓库或分享给他人。
-- 如需迁移配置，请在目标设备重新填写密码认证的服务器密码。
+- 便携版默认在程序工作目录使用 `config.json` 保存服务器与 Tunnel 配置。
+- Windows 安装版（MSI / Setup EXE）在系统应用配置目录保存配置文件，路径为：%APPDATA%\com.sshforward.desktop\config.json。
+- 密码认证在 Windows 上使用 DPAPI 进行加密保存。如果将 `config.json` 复制/迁移到其他设备或更换系统用户，解密密码将不可用，请在目标设备上重新编辑服务器并重新保存密码。
+- 请妥善保管 `config.json` 文件，不要提交到 Git 仓库或分享给他人。
 - 建议在修改大量 Tunnel 前备份 `config.json`。
+
+## 命令行工具 (CLI)
+
+除了桌面客户端，项目还包含命令行工具 `ssh-forward`（位于 `apps/cli`），方便在终端下管理和启动端口转发。
+
+```bash
+# 查看帮助
+ssh-forward --help
+
+# 列出已保存的服务器与 Tunnel
+ssh-forward host list
+ssh-forward tunnel list
+
+# 添加服务器
+ssh-forward host add my-server --host 192.168.1.100 --user root --port 22 --key ~/.ssh/id_rsa
+
+# 添加 Tunnel
+ssh-forward tunnel add web-tunnel --host my-server --local 127.0.0.1:18888 --remote 127.0.0.1:80
+
+# 启动转发
+ssh-forward start web-tunnel
+
+# 删除配置
+ssh-forward tunnel remove web-tunnel
+ssh-forward host remove my-server
+```
 
 ## 系统要求
 
@@ -123,3 +149,4 @@ macOS 应用当前未进行 Apple Developer 签名和公证。首次打开时如
 推送 `v*` 格式的 Git 标签会触发 GitHub Actions，在 Windows、macOS Intel 和 macOS Apple Silicon 上构建并发布安装版与便携版资产。
 
 发布完成后可在 [Releases](https://github.com/RaInSLc/ssh_forward/releases) 下载对应文件。
+

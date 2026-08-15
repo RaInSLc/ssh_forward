@@ -405,3 +405,26 @@ p {
 :root[data-theme="dark"] .about p {
   color: #b9c5d8;
 }
+.danger {
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #fff;
+  font-weight: 800;
+  background: #d93856;
+}
+.actions button.danger-link {
+  color: #d93856;
+  background: #fde5ea;
+}
+:root[data-theme="dark"] .actions button.danger-link {
+  color: #ff94a8;
+  background: #401b24;
+}
+.form-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+
