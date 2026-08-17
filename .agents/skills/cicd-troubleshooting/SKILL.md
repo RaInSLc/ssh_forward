@@ -64,32 +64,49 @@ description: >-
 ---
 
 ### 5. 版本号与 Git Tag 冲突或资产未生成
-- **现象**：Tauri 构建完成但发布资产上传缺失，或者 Tag 覆盖导致 Actions 行为异常。
-- **关键规则**：
-  - 项目四大版本号必须严格同步：
+- **现象**：
+  - 执行 `git tag vX.Y.Z` 报错 `fatal: tag 'vX.Y.Z' already exists`，导致 Git 仍将旧 Commit 的 Tag 推送至远程，CI/CD 构建旧代码而失败。
+  - Tauri 构建完成但发布资产上传缺失，或者 Tag 覆盖导致 Actions 行为异常。
+- **关键规则与修复规程**：
+  - 项目三大版本号必须严格同步：
     1. 根目录 `Cargo.toml` (`[workspace.package] version`)
     2. `apps/desktop/package.json` (`version`)
     3. `apps/desktop/src-tauri/tauri.conf.json` (`version`)
-    4. `apps/desktop/src/App.tsx` (`version` 常量)
   - 每次发布新版本必须在 `CHANGELOG.md` 中记录变更日志。
+  - **Tag 安全发布防踩坑**：打 Tag 前必须检查是否存在同名本地/远程 Tag，若需重新发布或覆盖修复，必须按如下安全序列执行：
+    ```powershell
+    # 删除本地旧 Tag -> 删除远程旧 Tag -> 为最新 HEAD 打上新 Tag -> 重新推送
+    git tag -d vX.Y.Z ; git push origin :refs/tags/vX.Y.Z ; git tag vX.Y.Z ; git push origin main --tags
+    ```
+
+---
+
+### 6. Tauri v2 在线更新（Updater）签名与 latest.json 规范
+- **现象**：客户端检查更新报错 `None of the fallback platforms '["windows-x86_64"]' were found in the response 'platforms' object`。
+- **根因**：
+  - GitHub Actions 构建时未注入 `TAURI_SIGNING_PRIVATE_KEY` 导致未生成 `.sig` 签名；
+  - 发布任务未自动聚合生成跨平台 `latest.json`。
+- **修复与防范**：
+  - 确保 GitHub Secrets 中配置了 `TAURI_SIGNING_PRIVATE_KEY`；
+  - 前端捕获缺失平台 manifest 时优雅提示“当前已是最新版本”，避免生硬报错。
 
 ---
 
 ## 二、 自动化发布前“四步合规自检”标准流程 (Pre-Push Checklist)
 
-在推送 Git Tag 触发 CI/CD 之前，**必须按顺序在本地执行以下自检**：
+在推送 Git Tag 触发 CI/CD 之前，**必须按顺序在本地执行以下自检，全部返回 0 才能发布**：
 
 ```powershell
-# 1. 自动格式化并校验 Rust 代码
+# 1. 自动格式化并校验 Rust 代码（确保 0 差异）
 cargo fmt --all ; cargo fmt --all -- --check
 
-# 2. 运行 Clippy 零警告检查
+# 2. 运行 Clippy 零警告严格检查（-D warnings 拦截一切告警，尤其是 collapsible_if）
 cargo clippy --workspace -- -D warnings
 
-# 3. 运行全量单元测试
-cargo test -p ssh-forward-config -p ssh-forward-ssh -p ssh-forward-core
+# 3. 运行工作区全量单元测试
+cargo test --workspace
 
-# 4. 前端类型检查与打包验证
+# 4. 前端类型检查与生产打包验证
 npm --prefix apps\desktop run check ; npm --prefix apps\desktop run build
 ```
 
@@ -109,15 +126,16 @@ git push origin main --tags
 当收到用户报告 CI/CD 失败时，执行以下排查规程：
 
 1. **获取失败阶段**：
-   - 访问 GitHub Actions 运行页面或 API（`https://api.github.com/repos/RaInSLc/ssh_forward/actions/runs`）。
+   - 访问 GitHub Actions 运行页面或 API。
    - 查看是在 `build (windows-latest)`、`build (macos-15-intel)` 还是 `build (macos-14)` 阶段失败。
 2. **定位失败步骤**：
    - 若在 30 秒~1 分钟内所有 Runner 均失败，通常是 `cargo fmt` 或 `cargo clippy` 拦截。
    - 若仅 macOS Runner 失败，通常是 `#[cfg(windows)]` 平台专属 API 泄漏或跨平台编译缺少 Stub。
-   - 若在 `Build desktop bundles` 失败，检查 Tauri 配置文件 `tauri.conf.json` 或前端资源缺失。
+   - 若在 `Build desktop bundles` 失败，检查 Tauri 配置文件 `tauri.conf.json`、私钥签名密钥或前端资源缺失。
 3. **修复与重新发布**：
    - 针对根因修改代码，执行本地自检。
    - 删除旧 Tag 并推送更新后的 Tag：
      ```powershell
      git tag -d vX.Y.Z ; git push origin :refs/tags/vX.Y.Z ; git tag vX.Y.Z ; git push origin main --tags
      ```
+
