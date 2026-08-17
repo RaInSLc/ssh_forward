@@ -655,11 +655,12 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) && let Some(state) = window.try_state::<AppState>()
             {
-                if let Some(state) = window.try_state::<AppState>() {
-                    cleanup_forwards(&state);
-                }
+                cleanup_forwards(&state);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -680,10 +681,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building SSH Forward desktop application")
         .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } = event {
-                if let Some(state) = app_handle.try_state::<AppState>() {
-                    cleanup_forwards(&state);
-                }
+            if matches!(
+                event,
+                tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+            ) && let Some(state) = app_handle.try_state::<AppState>()
+            {
+                cleanup_forwards(&state);
             }
         });
 }
