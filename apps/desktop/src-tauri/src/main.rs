@@ -9,8 +9,6 @@ use std::{
 
 #[cfg(windows)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use serde::Serialize;
 use ssh_forward_config::{Auth, AuthType, Config, Endpoint, Host, Tunnel, load, validate};
 use ssh_forward_core::{
@@ -18,6 +16,8 @@ use ssh_forward_core::{
     update_host, update_tunnel,
 };
 use ssh_forward_ssh::OpenSshForward;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager, State};
 #[cfg(windows)]
 use windows_sys::Win32::{
