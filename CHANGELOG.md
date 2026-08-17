@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.13] - 2026-08-17
 
 ### Added
 - 集成 Tauri v2 官方在线更新机制（`tauri-plugin-updater` & `@tauri-apps/plugin-updater`）。
