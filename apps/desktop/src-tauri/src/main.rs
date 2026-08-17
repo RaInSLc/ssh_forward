@@ -119,10 +119,8 @@ fn ensure_host_key(hostname: &str, port: u16) -> Result<(), String> {
     #[cfg(windows)]
     lookup_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
-    if let Ok(status) = lookup_cmd.status() {
-        if status.success() {
-            return Ok(());
-        }
+    if lookup_cmd.status().is_ok_and(|status| status.success()) {
+        return Ok(());
     }
 
     let mut scan_cmd = Command::new("ssh-keyscan");
