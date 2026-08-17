@@ -32,6 +32,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Check out release tag
         uses: actions/checkout@v4
@@ -86,9 +88,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
-          Copy-Item target/release/bundle/msi/*.msi release-assets/
-          Copy-Item target/release/bundle/nsis/*-setup.exe release-assets/
-          Copy-Item target/release/bundle/*-portable.zip release-assets/
+          Get-ChildItem -Path target/release/bundle -Recurse -Include *.msi, *-setup.exe, *-portable.zip, *.sig, *.nsis.zip | Copy-Item -Destination release-assets/
 
       - name: Create macOS portable archive
         if: runner.os == 'macOS'
@@ -105,8 +105,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
-          find target/release/bundle -type f -name '*.dmg' -exec cp {} release-assets/ \;
-          find target/release/bundle -type f -name '*-portable.zip' -exec cp {} release-assets/ \;
+          find target/release/bundle -type f \( -name '*.dmg' -o -name '*-portable.zip' -o -name '*.sig' -o -name '*.tar.gz' \) -exec cp {} release-assets/ \;
           test -n "$(find release-assets -type f -name '*.dmg' -print -quit)"
           test -n "$(find release-assets -type f -name '*-portable.zip' -print -quit)"
 
@@ -128,6 +127,63 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Generate latest.json updater metadata
+        shell: bash
+        run: |
+          node - << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const tag = process.env.RELEASE_TAG || '';
+          const version = tag.replace(/^v/, '');
+          const assetsDir = path.resolve('release-assets');
+          const files = fs.readdirSync(assetsDir);
+          
+          const repo = process.env.GITHUB_REPOSITORY || 'RaInSLc/ssh_forward';
+          const baseUrl = `https://github.com/${repo}/releases/download/${tag}`;
+
+          const manifest = {
+            version: tag,
+            notes: `Release ${tag}`,
+            pub_date: new Date().toISOString(),
+            platforms: {}
+          };
+
+          for (const file of files) {
+            if (file.endsWith('.sig')) {
+              const targetName = file.slice(0, -4);
+              if (files.includes(targetName)) {
+                const sigContent = fs.readFileSync(path.join(assetsDir, file), 'utf8').trim();
+                const assetUrl = `${baseUrl}/${targetName}`;
+                
+                if (targetName.includes('x64') || targetName.includes('x86_64')) {
+                  if (targetName.endsWith('.exe') || targetName.endsWith('.zip') || targetName.endsWith('.msi')) {
+                    manifest.platforms['windows-x86_64'] = {
+                      signature: sigContent,
+                      url: assetUrl
+                    };
+                  }
+                  if (targetName.includes('macos') || targetName.endsWith('.dmg') || targetName.endsWith('.tar.gz')) {
+                    manifest.platforms['darwin-x86_64'] = {
+                      signature: sigContent,
+                      url: assetUrl
+                    };
+                  }
+                }
+                if (targetName.includes('aarch64') || targetName.includes('arm64')) {
+                  manifest.platforms['darwin-aarch64'] = {
+                    signature: sigContent,
+                    url: assetUrl
+                  };
+                }
+              }
+            }
+          }
+
+          console.log('Generated updater manifest:', JSON.stringify(manifest, null, 2));
+          fs.writeFileSync(path.join(assetsDir, 'latest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+          EOF
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

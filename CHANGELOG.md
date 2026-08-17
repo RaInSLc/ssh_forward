@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- 集成 Tauri v2 官方在线更新机制（`tauri-plugin-updater` & `@tauri-apps/plugin-updater`）。
+- 桌面端关于弹窗支持检查 GitHub Releases 更新、展示版本更新说明、下载进度条与一键更新重启。
+- GitHub Actions CI/CD 流水线支持私钥数字签名打包并自动生成跨平台 `latest.json` 更新清单资产。
+- `.gitignore` 增加 `.tauri/` 和私钥文件隔离规则。
+
 ## [0.1.11] - 2026-08-17
 
 ### Fixed

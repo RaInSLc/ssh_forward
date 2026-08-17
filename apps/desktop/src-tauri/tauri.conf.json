@@ -21,5 +21,13 @@
     ],
     "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline';" }
   },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico", "icons/icon.icns"] }
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico", "icons/icon.icns"] },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdGOThCQkIwQTZENjUzQkUKUldTK1U5YW1zTHVZZng0UVV0NnB2QmNkb3dLejUwMTl3TmRqd1oraHR0cjFiNzRtaStVOVlqZXcK",
+      "endpoints": [
+        "https://github.com/RaInSLc/ssh_forward/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }

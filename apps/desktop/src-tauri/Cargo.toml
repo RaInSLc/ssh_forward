@@ -15,6 +15,7 @@ ssh-forward-config = { path = "../../../crates/ssh-forward-config" }
 ssh-forward-core = { path = "../../../crates/ssh-forward-core" }
 ssh-forward-ssh = { path = "../../../crates/ssh-forward-ssh" }
 tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"
 uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]

@@ -620,6 +620,7 @@ fn stop_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.manage(AppState {
                 config_path: Mutex::new(

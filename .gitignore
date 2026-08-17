@@ -1,6 +1,10 @@
 # Sensitive runtime configuration and SSH trust data
 config.json
 known_hosts
+.tauri/
+*.key
+*.key.pub
+
 
 # Rust build output and project-local Cargo cache
 target/

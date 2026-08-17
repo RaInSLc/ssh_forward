@@ -428,3 +428,62 @@ p {
   margin-top: 4px;
 }
 
+.update-box {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f0f4f9;
+  border: 1px solid #dce4ef;
+}
+:root[data-theme="dark"] .update-box {
+  background: #172336;
+  border-color: #2c3c55;
+}
+.update-status {
+  font-size: 13px;
+  color: #51627e;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+:root[data-theme="dark"] .update-status {
+  color: #9bb0d3;
+}
+.update-progress-track {
+  width: 100%;
+  height: 6px;
+  background: #d8e2ef;
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+:root[data-theme="dark"] .update-progress-track {
+  background: #25354d;
+}
+.update-progress-fill {
+  height: 100%;
+  background: #3577de;
+  transition: width 0.2s ease;
+}
+.update-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.update-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid #3577de;
+  background: #3577de;
+  color: #fff;
+  font-weight: 600;
+}
+.update-btn.secondary {
+  background: transparent;
+  color: #3577de;
+}
+:root[data-theme="dark"] .update-btn.secondary {
+  color: #6da2f8;
+  border-color: #6da2f8;
+}
+

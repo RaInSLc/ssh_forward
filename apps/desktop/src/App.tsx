@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 
 type AuthType = "ssh_agent" | "private_key" | "password";
 type Theme = "light" | "dark";
@@ -86,6 +87,71 @@ export default function App() {
   const [formError, setFormError] = useState("");
   const [aboutOpen, setAboutOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(storedTheme);
+
+  const [updateAvailable, setUpdateAvailable] = useState<Update | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [updateDownloaded, setUpdateDownloaded] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
+
+  const checkForUpdates = async (manual = true) => {
+    try {
+      setCheckingUpdate(true);
+      setUpdateMessage("正在检查更新...");
+      const update = await check();
+      if (update?.available) {
+        setUpdateAvailable(update);
+        setUpdateMessage(`发现新版本 v${update.version}`);
+      } else {
+        setUpdateAvailable(null);
+        if (manual) {
+          setUpdateMessage(`当前已是最新版本 (v${version})`);
+        }
+      }
+    } catch (error) {
+      console.error("检查更新失败", error);
+      if (manual) {
+        setUpdateMessage(`检查更新失败: ${String(error)}`);
+      }
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const downloadAndInstallUpdate = async () => {
+    if (!updateAvailable) return;
+    try {
+      setUpdateProgress(0);
+      setUpdateMessage("正在下载更新...");
+      let downloaded = 0;
+      let contentLength = 0;
+      await updateAvailable.downloadAndInstall((event) => {
+        switch (event.event) {
+          case "Started":
+            contentLength = event.data.contentLength ?? 0;
+            break;
+          case "Progress":
+            downloaded += event.data.chunkLength;
+            if (contentLength > 0) {
+              setUpdateProgress(Math.round((downloaded / contentLength) * 100));
+            }
+            break;
+          case "Finished":
+            setUpdateProgress(100);
+            setUpdateDownloaded(true);
+            setUpdateMessage("更新下载完成，准备安装并生效...");
+            break;
+        }
+      });
+      setUpdateDownloaded(true);
+      setUpdateMessage("更新已安装完成，请重启应用生效。");
+    } catch (error) {
+      console.error("下载安装更新失败", error);
+      setUpdateMessage(`更新失败: ${String(error)}`);
+      setUpdateProgress(null);
+    }
+  };
+
   const load = async () => {
     try {
       setSnapshot(await invoke<Snapshot>("get_snapshot"));
@@ -559,11 +625,53 @@ export default function App() {
       {aboutOpen && (
         <Modal title="关于 SSH Forward" close={() => setAboutOpen(false)}>
           <div className="about">
-            <p>SSH Forward {version}</p>
+            <p>SSH Forward v{version}</p>
             <p>本地 SSH 端口转发工具。</p>
             <a href={repositoryUrl} target="_blank" rel="noreferrer">
               {repositoryUrl}
             </a>
+
+            <div className="update-box">
+              <div className="update-status">
+                {updateMessage || `当前已安装版本: v${version}`}
+              </div>
+              {updateProgress !== null && (
+                <div className="update-progress-track">
+                  <div
+                    className="update-progress-fill"
+                    style={{ width: `${updateProgress}%` }}
+                  ></div>
+                </div>
+              )}
+              {updateAvailable?.body && (
+                <p style={{ fontSize: "12px", marginTop: "6px", whiteSpace: "pre-wrap" }}>
+                  <strong>更新说明：</strong>
+                  <br />
+                  {updateAvailable.body}
+                </p>
+              )}
+              <div className="update-actions">
+                {updateAvailable && !updateDownloaded ? (
+                  <button
+                    type="button"
+                    className="update-btn"
+                    disabled={updateProgress !== null}
+                    onClick={() => void downloadAndInstallUpdate()}
+                  >
+                    {updateProgress !== null ? `下载中 ${updateProgress}%` : "立即更新并安装"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="update-btn secondary"
+                    disabled={checkingUpdate}
+                    onClick={() => void checkForUpdates(true)}
+                  >
+                    {checkingUpdate ? "正在检查..." : "检查更新"}
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </Modal>
       )}
