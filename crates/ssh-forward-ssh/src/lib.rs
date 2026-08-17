@@ -91,6 +91,10 @@ impl OpenSshForward {
             command.env("SSH_FORWARD_PASSWORD", password);
         }
         let child = command.spawn().map_err(SshError::Start)?;
+        #[cfg(windows)]
+        {
+            job::assign_to_job(&child);
+        }
         Ok(Self { child, askpass })
     }
 
@@ -172,3 +176,55 @@ mod tests {
         assert!(args.contains(&"StrictHostKeyChecking=accept-new".into()));
     }
 }
+
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    struct SafeJob(HANDLE);
+    unsafe impl Send for SafeJob {}
+    unsafe impl Sync for SafeJob {}
+
+    impl Drop for SafeJob {
+        fn drop(&mut self) {
+            unsafe {
+                if self.0 != 0 as HANDLE {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    static GLOBAL_JOB: OnceLock<SafeJob> = OnceLock::new();
+
+    pub fn assign_to_job(child: &std::process::Child) {
+        let job = GLOBAL_JOB.get_or_init(|| unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle != 0 as HANDLE {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+            }
+            SafeJob(handle)
+        });
+
+        if job.0 != 0 as HANDLE {
+            unsafe {
+                AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE);
+            }
+        }
+    }
+}
+

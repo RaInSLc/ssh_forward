@@ -8,7 +8,15 @@ All notable changes to this project will be documented in this file.
 - 集成 Tauri v2 官方在线更新机制（`tauri-plugin-updater` & `@tauri-apps/plugin-updater`）。
 - 桌面端关于弹窗支持检查 GitHub Releases 更新、展示版本更新说明、下载进度条与一键更新重启。
 - GitHub Actions CI/CD 流水线支持私钥数字签名打包并自动生成跨平台 `latest.json` 更新清单资产。
+- 转发配置本地地址支持下拉选择（`127.0.0.1`、`0.0.0.0`、`localhost`）。
+- 新建 Tunnel 支持自动探测并分配空闲随机端口，表单新增“🎲 随机”端口分配按钮。
+- 后端新增 `get_available_port` 系统空闲端口原子探测命令。
 - `.gitignore` 增加 `.tauri/` 和私钥文件隔离规则。
+
+### Fixed
+- 修复 Windows 下软件意外关闭或直接关闭导致子进程 `ssh.exe` 变成孤儿进程持续占用端口的问题（引入 Windows 内核 Job Object 机制 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` + Tauri 窗口与退出生命周期双重自动清理）。
+- 修复关于弹窗中版本号未动态获取的问题，由后端 `Snapshot` 动态返回 `env!("CARGO_PKG_VERSION")`。
+- 优化检查更新异常捕获，屏蔽云端暂未上传本平台清单时的报错提示，提供友好的“已是最新版本”提示。
 
 ## [0.1.11] - 2026-08-17
 

@@ -487,3 +487,37 @@ p {
   border-color: #6da2f8;
 }
 
+.field-with-button {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.field-with-button label {
+  flex: 1;
+}
+.inline-random-btn {
+  height: 42px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid #cfdae9;
+  background: #f0f4f9;
+  color: #3577de;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+:root[data-theme="dark"] .inline-random-btn {
+  background: #172336;
+  border-color: #2c3c55;
+  color: #6da2f8;
+}
+.inline-random-btn:hover {
+  background: #e2ecf9;
+}
+:root[data-theme="dark"] .inline-random-btn:hover {
+  background: #20314a;
+}
+

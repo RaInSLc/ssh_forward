@@ -44,6 +44,7 @@ struct TunnelStatus {
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
     path: String,
+    version: String,
     config: Config,
     statuses: HashMap<String, TunnelStatus>,
 }
@@ -352,6 +353,7 @@ fn snapshot(state: &AppState) -> Result<Snapshot, String> {
     *state.statuses.lock().map_err(|_| "Tunnel 状态锁不可用")? = statuses.clone();
     Ok(Snapshot {
         path: path.display().to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         config,
         statuses,
     })
@@ -360,6 +362,19 @@ fn snapshot(state: &AppState) -> Result<Snapshot, String> {
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
     snapshot(&state)
+}
+
+#[tauri::command]
+fn get_available_port(host: Option<String>) -> Result<u16, String> {
+    let host = host.unwrap_or_else(|| "127.0.0.1".into());
+    let listener = std::net::TcpListener::bind(format!("{host}:0"))
+        .map_err(|e| format!("无法分配空闲端口: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("无法获取端口号: {e}"))?
+        .port();
+    drop(listener);
+    Ok(port)
 }
 
 #[tauri::command]
@@ -618,6 +633,14 @@ fn stop_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+fn cleanup_forwards(state: &AppState) {
+    if let Ok(mut forwards) = state.forwards.lock() {
+        for (_, mut forward) in forwards.drain() {
+            let _ = forward.stop();
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -631,8 +654,16 @@ fn main() {
             });
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
+                if let Some(state) = window.try_state::<AppState>() {
+                    cleanup_forwards(&state);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_available_port,
             set_config_path,
             validate_config,
             create_host,
@@ -645,6 +676,13 @@ fn main() {
             open_tunnel_in_browser,
             stop_tunnel
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running SSH Forward desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building SSH Forward desktop application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    cleanup_forwards(&state);
+                }
+            }
+        });
 }

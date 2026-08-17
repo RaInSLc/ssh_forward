@@ -31,6 +31,7 @@ type Status = {
 };
 type Snapshot = {
   path: string;
+  version?: string;
   config: { hosts: Host[]; tunnels: Tunnel[] };
   statuses: Record<string, Status>;
 };
@@ -53,7 +54,6 @@ type TunnelForm = {
   autoOpenBrowser: boolean;
 };
 
-const version = "0.1.11";
 const repositoryUrl = "https://github.com/RaInSLc/ssh_forward";
 const newHost = (): HostForm => ({
   name: "",
@@ -76,6 +76,16 @@ const newTunnel = (): TunnelForm => ({
 const storedTheme = (): Theme =>
   localStorage.getItem("ssh-forward-theme") === "dark" ? "dark" : "light";
 
+const fetchAvailablePort = async (host?: string): Promise<number> => {
+  try {
+    return await invoke<number>("get_available_port", {
+      host: host || "127.0.0.1",
+    });
+  } catch {
+    return Math.floor(10000 + Math.random() * 50000);
+  }
+};
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [notice, setNotice] = useState("正在加载配置...");
@@ -87,6 +97,8 @@ export default function App() {
   const [formError, setFormError] = useState("");
   const [aboutOpen, setAboutOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(storedTheme);
+
+  const appVersion = snapshot?.version ?? "0.1.11";
 
   const [updateAvailable, setUpdateAvailable] = useState<Update | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -105,13 +117,23 @@ export default function App() {
       } else {
         setUpdateAvailable(null);
         if (manual) {
-          setUpdateMessage(`当前已是最新版本 (v${version})`);
+          setUpdateMessage(`当前已是最新版本 (v${appVersion})`);
         }
       }
     } catch (error) {
-      console.error("检查更新失败", error);
-      if (manual) {
-        setUpdateMessage(`检查更新失败: ${String(error)}`);
+      const errStr = String(error);
+      if (
+        errStr.includes("None of the fallback platforms") ||
+        errStr.includes("404") ||
+        errStr.includes("not found")
+      ) {
+        setUpdateAvailable(null);
+        setUpdateMessage(`当前已是最新版本 (v${appVersion})`);
+      } else {
+        console.error("检查更新失败", error);
+        if (manual) {
+          setUpdateMessage(`检查更新提示: ${errStr}`);
+        }
       }
     } finally {
       setCheckingUpdate(false);
@@ -284,23 +306,26 @@ export default function App() {
     );
     setPanel("host");
   };
-  const openTunnel = (tunnel?: Tunnel) => {
+  const openTunnel = async (tunnel?: Tunnel) => {
     setFormError("");
     const host = tunnel && hosts.find((item) => item.id === tunnel.host_id);
     setTunnelEditing(tunnel?.name ?? null);
-    setTunnelForm(
-      tunnel
-        ? {
-            name: tunnel.name,
-            hostName: host?.name ?? "",
-            localHost: tunnel.local.host,
-            localPort: tunnel.local.port,
-            remoteHost: tunnel.remote.host,
-            remotePort: tunnel.remote.port,
-            autoOpenBrowser: tunnel.auto_open_browser,
-          }
-        : newTunnel()
-    );
+    if (tunnel) {
+      setTunnelForm({
+        name: tunnel.name,
+        hostName: host?.name ?? "",
+        localHost: tunnel.local.host,
+        localPort: tunnel.local.port,
+        remoteHost: tunnel.remote.host,
+        remotePort: tunnel.remote.port,
+        autoOpenBrowser: tunnel.auto_open_browser,
+      });
+    } else {
+      const defaultForm = newTunnel();
+      const randomPort = await fetchAvailablePort(defaultForm.localHost);
+      defaultForm.localPort = randomPort;
+      setTunnelForm(defaultForm);
+    }
     setPanel("tunnel");
   };
   return (
@@ -340,7 +365,7 @@ export default function App() {
             配置文件：{snapshot?.path ?? "加载中..."}
           </span>
           <button className="about-link" onClick={() => setAboutOpen(true)}>
-            关于 SSH Forward {version}
+            关于 SSH Forward v{appVersion}
           </button>
         </footer>
       </aside>
@@ -551,21 +576,40 @@ export default function App() {
               </select>
             </label>
             <div className="pair">
-              <Field
-                label="本地地址"
-                value={tunnelForm.localHost}
-                set={(value) =>
-                  setTunnelForm({ ...tunnelForm, localHost: value })
-                }
-              />
-              <Field
-                label="本地端口"
-                type="number"
-                value={tunnelForm.localPort}
-                set={(value) =>
-                  setTunnelForm({ ...tunnelForm, localPort: Number(value) })
-                }
-              />
+              <label>
+                本地地址
+                <select
+                  value={tunnelForm.localHost}
+                  onChange={(event) =>
+                    setTunnelForm({ ...tunnelForm, localHost: event.target.value })
+                  }
+                >
+                  <option value="127.0.0.1">127.0.0.1 (仅本机)</option>
+                  <option value="0.0.0.0">0.0.0.0 (允许局域网访问)</option>
+                  <option value="localhost">localhost</option>
+                </select>
+              </label>
+              <div className="field-with-button">
+                <Field
+                  label="本地端口"
+                  type="number"
+                  value={tunnelForm.localPort}
+                  set={(value) =>
+                    setTunnelForm({ ...tunnelForm, localPort: Number(value) })
+                  }
+                />
+                <button
+                  type="button"
+                  className="inline-random-btn"
+                  title="随机分配一个未被占用的空闲端口"
+                  onClick={async () => {
+                    const port = await fetchAvailablePort(tunnelForm.localHost);
+                    setTunnelForm((prev) => ({ ...prev, localPort: port }));
+                  }}
+                >
+                  🎲 随机
+                </button>
+              </div>
             </div>
             <div className="pair">
               <Field
@@ -625,7 +669,7 @@ export default function App() {
       {aboutOpen && (
         <Modal title="关于 SSH Forward" close={() => setAboutOpen(false)}>
           <div className="about">
-            <p>SSH Forward v{version}</p>
+            <p>SSH Forward v{appVersion}</p>
             <p>本地 SSH 端口转发工具。</p>
             <a href={repositoryUrl} target="_blank" rel="noreferrer">
               {repositoryUrl}
@@ -633,7 +677,7 @@ export default function App() {
 
             <div className="update-box">
               <div className="update-status">
-                {updateMessage || `当前已安装版本: v${version}`}
+                {updateMessage || `当前已安装版本: v${appVersion}`}
               </div>
               {updateProgress !== null && (
                 <div className="update-progress-track">
