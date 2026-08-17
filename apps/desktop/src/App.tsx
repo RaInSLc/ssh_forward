@@ -52,7 +52,7 @@ type TunnelForm = {
   autoOpenBrowser: boolean;
 };
 
-const version = "0.1.10";
+const version = "0.1.11";
 const repositoryUrl = "https://github.com/RaInSLc/ssh_forward";
 const newHost = (): HostForm => ({
   name: "",

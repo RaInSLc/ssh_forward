@@ -36,7 +36,7 @@ pub fn openssh_arguments(settings: &Settings, host: &Host, tunnel: &Tunnel) -> V
         format!(
             "StrictHostKeyChecking={}",
             if settings.strict_host_key_checking {
-                "yes"
+                "accept-new"
             } else {
                 "no"
             }
@@ -169,6 +169,6 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["-L", "127.0.0.1:18080:127.0.0.1:8080"])
         );
-        assert!(args.contains(&"StrictHostKeyChecking=yes".into()));
+        assert!(args.contains(&"StrictHostKeyChecking=accept-new".into()));
     }
 }

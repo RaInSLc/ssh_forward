@@ -9,6 +9,8 @@ use std::{
 
 #[cfg(windows)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use serde::Serialize;
 use ssh_forward_config::{Auth, AuthType, Config, Endpoint, Host, Tunnel, load, validate};
 use ssh_forward_core::{
@@ -109,45 +111,54 @@ fn ensure_host_key(hostname: &str, port: u16) -> Result<(), String> {
     } else {
         format!("[{hostname}]:{port}")
     };
-    let lookup = Command::new("ssh-keygen")
+    let mut lookup_cmd = Command::new("ssh-keygen");
+    lookup_cmd
         .args(["-F", &lookup_name])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| format!("无法检查 SSH Host Key：{error}"))?;
-    if lookup.success() {
-        return Ok(());
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    lookup_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
+    if let Ok(status) = lookup_cmd.status() {
+        if status.success() {
+            return Ok(());
+        }
     }
 
-    let scan = Command::new("ssh-keyscan")
-        .args([
-            "-T",
-            "10",
-            "-p",
-            &port.to_string(),
-            "-t",
-            "ed25519",
-            hostname,
-        ])
-        .output()
-        .map_err(|error| format!("无法获取 SSH Host Key：{error}"))?;
-    if !scan.status.success() || scan.stdout.is_empty() {
-        return Err("无法获取 SSH Host Key；请检查服务器地址、端口和网络".into());
-    }
-    let path = known_hosts_path()?;
-    let parent = path.parent().ok_or("known_hosts 路径无效")?;
-    std::fs::create_dir_all(parent).map_err(|error| format!("无法创建 SSH 配置目录：{error}"))?;
+    let mut scan_cmd = Command::new("ssh-keyscan");
+    scan_cmd
+        .args(["-T", "5", "-p", &port.to_string(), hostname])
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    scan_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
+    let scan = match scan_cmd.output() {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => output,
+        _ => {
+            // 如果 ssh-keyscan 预探测未获取到（例如网络防火墙拦截或特殊协议），不阻断启动，交由主 OpenSSH 连接处理
+            return Ok(());
+        }
+    };
+
+    let path = match known_hosts_path() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    let parent = match path.parent() {
+        Some(parent) => parent,
+        None => return Ok(()),
+    };
+    let _ = std::fs::create_dir_all(parent);
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
+    if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|error| format!("无法保存 SSH Host Key：{error}"))?;
-    file.write_all(&scan.stdout)
-        .map_err(|error| format!("无法写入 SSH Host Key：{error}"))?;
-    if !scan.stdout.ends_with(b"\n") {
-        file.write_all(b"\n")
-            .map_err(|error| format!("无法完成 SSH Host Key 写入：{error}"))?;
+    {
+        let _ = file.write_all(&scan.stdout);
+        if !scan.stdout.ends_with(b"\n") {
+            let _ = file.write_all(b"\n");
+        }
     }
     Ok(())
 }
@@ -165,10 +176,13 @@ fn local_browser_url(tunnel: &Tunnel) -> Result<String, String> {
 fn open_in_browser(tunnel: &Tunnel) -> Result<(), String> {
     let url = local_browser_url(tunnel)?;
     #[cfg(windows)]
-    Command::new("cmd")
-        .args(["/C", "start", "", &url])
-        .spawn()
-        .map_err(|error| format!("无法打开系统默认浏览器：{error}"))?;
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", &url]);
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd.spawn()
+            .map_err(|error| format!("无法打开系统默认浏览器：{error}"))?;
+    }
     #[cfg(target_os = "macos")]
     Command::new("open")
         .arg(&url)
@@ -507,65 +521,66 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
                 message: None,
             },
         );
-    let config = snapshot(&state)?.config;
-    let tunnel = config
-        .tunnels
-        .iter()
-        .find(|tunnel| tunnel.name == name)
-        .ok_or("未找到 Tunnel")?;
-    let host = config
-        .hosts
-        .iter()
-        .find(|host| host.id == tunnel.host_id)
-        .ok_or("未找到 Tunnel 对应的服务器")?;
-    ensure_host_key(&host.hostname, host.port)?;
-    let password = match host.auth.kind {
-        AuthType::Password => unprotect_password(
-            host.auth
-                .encrypted_password
-                .as_deref()
-                .ok_or("该服务器使用旧密码配置；请编辑服务器并重新输入密码以迁移到加密配置")?,
-        )
-        .map(Some),
-        _ => Ok(None),
-    }?;
-    match start_tunnel_with_password(&config, &name, password.as_deref()) {
-        Ok(forward) => {
-            state
-                .forwards
-                .lock()
-                .map_err(|_| "Tunnel 运行时锁不可用")?
-                .insert(name.clone(), forward);
-            state
-                .statuses
-                .lock()
-                .map_err(|_| "Tunnel 状态锁不可用")?
-                .insert(
-                    name,
-                    TunnelStatus {
-                        state: "running".into(),
-                        message: None,
-                    },
-                );
-            if tunnel.auto_open_browser {
-                open_in_browser(tunnel)?;
-            }
-            Ok(())
+    let run_start = || -> Result<(), String> {
+        let config = snapshot(&state)?.config;
+        let tunnel = config
+            .tunnels
+            .iter()
+            .find(|tunnel| tunnel.name == name)
+            .ok_or("未找到 Tunnel")?;
+        let host = config
+            .hosts
+            .iter()
+            .find(|host| host.id == tunnel.host_id)
+            .ok_or("未找到 Tunnel 对应的服务器")?;
+        ensure_host_key(&host.hostname, host.port)?;
+        let password = match host.auth.kind {
+            AuthType::Password => unprotect_password(
+                host.auth
+                    .encrypted_password
+                    .as_deref()
+                    .ok_or("该服务器使用旧密码配置；请编辑服务器并重新输入密码以迁移到加密配置")?,
+            )
+            .map(Some),
+            _ => Ok(None),
+        }?;
+        let forward = start_tunnel_with_password(&config, &name, password.as_deref())
+            .map_err(|e| e.to_string())?;
+        state
+            .forwards
+            .lock()
+            .map_err(|_| "Tunnel 运行时锁不可用")?
+            .insert(name.clone(), forward);
+        state
+            .statuses
+            .lock()
+            .map_err(|_| "Tunnel 状态锁不可用")?
+            .insert(
+                name.clone(),
+                TunnelStatus {
+                    state: "running".into(),
+                    message: None,
+                },
+            );
+        if tunnel.auto_open_browser {
+            let _ = open_in_browser(tunnel);
         }
+        Ok(())
+    };
+
+    match run_start() {
+        Ok(()) => Ok(()),
         Err(error) => {
-            let message = error.to_string();
-            state
-                .statuses
-                .lock()
-                .map_err(|_| "Tunnel 状态锁不可用")?
-                .insert(
+            let _ = state.statuses.lock().map(|mut s| {
+                s.insert(
                     name,
                     TunnelStatus {
                         state: "error".into(),
-                        message: Some(message.clone()),
+                        message: Some(error.clone()),
                     },
                 );
-            Err(message)
+            });
+            Err(error)
         }
     }
 }

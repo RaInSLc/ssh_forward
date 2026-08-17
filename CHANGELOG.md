@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.11] - 2026-08-17
+
+### Fixed
+- 修复 Windows 下启动 Tunnel 时弹出 `ssh-keyscan.exe` 黑色控制台窗口的问题（增加 `CREATE_NO_WINDOW` 标记）。
+- 修复 `ssh-keyscan` 强制限定 `-t ed25519` 导致 RSA/ECDSA 密钥类型服务器无法获取 Host Key 并启动失败的问题。
+- 将 OpenSSH 连接策略更新为 `StrictHostKeyChecking=accept-new`，实现首次连接自动安全登记 Host Key，避免无谓阻塞与扫描失败拦截。
+- 完善 `start_tunnel` 启动前置阶段的错误捕获与状态同步机制。
+
 ## [0.1.10] - 2026-08-15
 
 ### Added
