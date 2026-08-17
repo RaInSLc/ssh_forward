@@ -655,7 +655,8 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
+            if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event
+            {
                 if let Some(state) = window.try_state::<AppState>() {
                     cleanup_forwards(&state);
                 }
