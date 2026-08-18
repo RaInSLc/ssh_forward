@@ -34,11 +34,11 @@ button:disabled {
 main {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 246px minmax(0, 1fr);
+  grid-template-columns: 216px minmax(0, 1fr);
 }
 aside {
   min-height: 100vh;
-  padding: 28px 18px 18px;
+  padding: 22px 14px 14px;
   display: flex;
   flex-direction: column;
   background: #fff;
@@ -160,20 +160,20 @@ aside footer {
 .workspace {
   width: 100%;
   max-width: 1200px;
-  padding: 36px clamp(18px, 4vw, 60px);
+  padding: 24px clamp(14px, 2.5vw, 36px);
   margin: 0 auto;
 }
 .workspace > header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 h1,
@@ -183,13 +183,13 @@ p {
 }
 .workspace h1 {
   margin-bottom: 0;
-  font-size: clamp(26px, 3.5vw, 36px);
+  font-size: clamp(24px, 3vw, 32px);
   letter-spacing: -0.045em;
 }
 .primary {
   border: 0;
   border-radius: 8px;
-  padding: 9px 15px;
+  padding: 8px 14px;
   color: #fff;
   font-weight: 700;
   font-size: 13px;
@@ -203,15 +203,15 @@ p {
 /* 隧道卡片网格布局 */
 .tunnels-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
-  margin-top: 24px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin-top: 20px;
 }
 .tunnel-card,
 .zero {
-  padding: 18px;
+  padding: 16px;
   border: 1px solid #dce4ef;
-  border-radius: 13px;
+  border-radius: 12px;
   background: #fff;
   box-shadow: 0 4px 16px #21365308;
   display: flex;
@@ -232,7 +232,7 @@ p {
 }
 .tunnel-head h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
 }
 .status {
@@ -297,7 +297,7 @@ p {
 
 /* 卡片动作按钮（修复换行变形问题） */
 .actions {
-  margin-top: 16px;
+  margin-top: 14px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -305,9 +305,9 @@ p {
 }
 .actions button {
   border: 0;
-  border-radius: 7px;
-  padding: 6px 10px;
-  font-size: 12px;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 11px;
   font-weight: 600;
   color: #53637d;
   background: #edf2f8;
@@ -338,13 +338,13 @@ p {
   background: #401b24;
 }
 
-/* 表格视图 Table View (紧凑、自适应) */
+/* 表格视图 Table View (紧凑、自适应无横向滚动) */
 .table-wrapper {
-  margin-top: 24px;
+  margin-top: 20px;
   border: 1px solid #dce4ef;
   border-radius: 12px;
   background: #fff;
-  overflow-x: auto;
+  overflow: hidden;
   box-shadow: 0 4px 16px #21365306;
 }
 :root[data-theme="dark"] .table-wrapper {
@@ -354,12 +354,13 @@ p {
 }
 .tunnels-table {
   width: 100%;
+  table-layout: auto;
   border-collapse: collapse;
   text-align: left;
 }
 .tunnels-table th {
-  padding: 12px 16px;
-  font-size: 12px;
+  padding: 10px 12px;
+  font-size: 11px;
   font-weight: 700;
   color: #64748b;
   background: #f8fafc;
@@ -372,8 +373,8 @@ p {
   color: #94a3b8;
 }
 .tunnels-table td {
-  padding: 12px 16px;
-  font-size: 13px;
+  padding: 10px 12px;
+  font-size: 12px;
   border-bottom: 1px solid #f1f5f9;
   vertical-align: middle;
 }
@@ -386,28 +387,38 @@ p {
 .table-title-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
+}
+.table-title-cell strong {
+  font-size: 13px;
 }
 .table-error-hint {
   font-size: 11px;
   color: #e11d48;
-  margin-top: 4px;
+  margin-top: 3px;
+}
+.table-route-cell {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
 }
 .port-badge {
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
+  font-size: 11px;
   background: #eff6ff;
   color: #1d4ed8;
-  padding: 3px 6px;
+  padding: 2px 5px;
   border-radius: 4px;
+  font-weight: 600;
 }
 :root[data-theme="dark"] .port-badge {
   background: #1e3a8a;
   color: #93c5fd;
 }
 .table-dest-desc {
-  font-size: 12px;
+  font-size: 11px;
   color: #475569;
 }
 :root[data-theme="dark"] .table-dest-desc {
@@ -416,7 +427,7 @@ p {
 .table-dest-desc code {
   font-family: ui-monospace, Consolas, monospace;
   background: #f1f5f9;
-  padding: 2px 5px;
+  padding: 2px 4px;
   border-radius: 4px;
 }
 :root[data-theme="dark"] .table-dest-desc code {
@@ -426,13 +437,14 @@ p {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex-wrap: nowrap;
 }
 .btn-sm {
   border: 0;
-  border-radius: 6px;
-  padding: 5px 9px;
-  font-size: 12px;
+  border-radius: 5px;
+  padding: 4px 7px;
+  font-size: 11px;
   font-weight: 600;
   color: #475569;
   background: #f1f5f9;

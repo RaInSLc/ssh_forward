@@ -631,16 +631,15 @@ export default function App() {
 
         {/* 隧道列表容器：支持卡片与表格视图自适应 */}
         <div className={`tunnels-container view-${viewMode}`}>
-          {/* 表格视图 Table View */}
+          {/* 表格视图 Table View (紧凑、自适应无横向滚动) */}
           <div className="table-wrapper">
             <table className="tunnels-table">
               <thead>
                 <tr>
-                  <th>名称 / 模式</th>
-                  <th>本地端口 / 地址</th>
-                  <th>远端目标 / 路径</th>
-                  <th>状态</th>
-                  <th style={{ textAlign: "right" }}>操作</th>
+                  <th style={{ width: "22%" }}>名称 / 模式</th>
+                  <th style={{ width: "40%" }}>转发链路 / 路由</th>
+                  <th style={{ width: "12%" }}>状态</th>
+                  <th style={{ width: "26%", textAlign: "right" }}>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -661,10 +660,10 @@ export default function App() {
                           {advancedMode && (
                             <span className={`mode-badge ${tunnel.type}`}>
                               {isDynamic
-                                ? "SOCKS5 代理"
+                                ? "SOCKS5"
                                 : isRemote
-                                ? "Remote 穿透"
-                                : "Local 转发"}
+                                ? "Remote"
+                                : "Local"}
                             </span>
                           )}
                           {advancedMode && tunnel.gateway_ports && (
@@ -676,24 +675,26 @@ export default function App() {
                         )}
                       </td>
                       <td>
-                        <code className="port-badge">
-                          {tunnel.local.host}:{tunnel.local.port}
-                        </code>
-                      </td>
-                      <td>
-                        {isDynamic ? (
-                          <span className="table-dest-desc">
-                            🌐 代理访问 <code>{host?.hostname ?? "远端服务器"}</code> 私有网络
-                          </span>
-                        ) : isRemote ? (
-                          <span className="table-dest-desc">
-                            📡 公网 <code>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</code> → 本地
-                          </span>
-                        ) : (
-                          <span className="table-dest-desc">
-                            → <code>{tunnel.remote?.host}:{tunnel.remote?.port}</code> ({host?.name ?? ""})
-                          </span>
-                        )}
+                        <div className="table-route-cell">
+                          <code className="port-badge">
+                            {tunnel.local.host}:{tunnel.local.port}
+                          </code>
+                          <span className="route-arrow">➔</span>
+                          {isDynamic ? (
+                            <span className="table-dest-desc">
+                              🌐 <code>{host?.hostname ?? "远端"}</code> (SOCKS5 全网)
+                            </span>
+                          ) : isRemote ? (
+                            <span className="table-dest-desc">
+                              📡 <code>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</code> (公网)
+                            </span>
+                          ) : (
+                            <span className="table-dest-desc">
+                              <code>{tunnel.remote?.host}:{tunnel.remote?.port}</code>
+                              {host?.name ? ` (${host.name})` : ""}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td>
                         <span className={`status ${status.state}`}>
@@ -708,7 +709,7 @@ export default function App() {
                               disabled={!running}
                               onClick={() => copyToClipboard(socksAddress, `tbl-socks-${tunnel.id}`)}
                             >
-                              {copiedId === `tbl-socks-${tunnel.id}` ? "✓ 已复制" : "复制代理"}
+                              {copiedId === `tbl-socks-${tunnel.id}` ? "✓ 已复制" : "复制"}
                             </button>
                           ) : isRemote ? (
                             <button
@@ -721,7 +722,7 @@ export default function App() {
                                 )
                               }
                             >
-                              {copiedId === `tbl-remote-${tunnel.id}` ? "✓ 已复制" : "复制公网"}
+                              {copiedId === `tbl-remote-${tunnel.id}` ? "✓ 已复制" : "复制"}
                             </button>
                           ) : (
                             <>
