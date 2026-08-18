@@ -60,7 +60,7 @@ const newHost = (): HostForm => ({
   hostname: "",
   port: 22,
   username: "",
-  authType: "ssh_agent",
+  authType: "password",
   privateKey: "",
   password: "",
 });
@@ -416,7 +416,21 @@ export default function App() {
                   </span>
                 </div>
                 {status.message && (
-                  <p className="error-text">{status.message}</p>
+                  <div className="error-box">
+                    <p className="error-text">{status.message}</p>
+                    {(() => {
+                      const host = hosts.find((h) => h.id === tunnel.host_id);
+                      return host ? (
+                        <button
+                          type="button"
+                          className="error-action-btn"
+                          onClick={() => openHost(host)}
+                        >
+                          ⚙️ 去修改服务器“{host.name}”的认证方式
+                        </button>
+                      ) : null;
+                    })()}
+                  </div>
                 )}
                 <div className="actions">
                   <button
@@ -500,26 +514,44 @@ export default function App() {
                   })
                 }
               >
-                <option value="ssh_agent">SSH Agent</option>
-                <option value="private_key">私钥</option>
-                <option value="password">密码</option>
+                <option value="password">密码 (推荐常规使用)</option>
+                <option value="private_key">私钥文件 (.pem / id_rsa)</option>
+                <option value="ssh_agent">SSH Agent (系统后台密钥代理)</option>
               </select>
             </label>
+            {hostForm.authType === "ssh_agent" && (
+              <div className="auth-hint-card">
+                <p>
+                  ℹ️ <strong>使用前置说明：</strong>此模式直接复用系统已加载的 SSH 私钥，无需在本软件保存密码。
+                </p>
+                <p>
+                  需确保本机已运行 <code>ssh-agent</code> 服务并执行过 <code>ssh-add</code>；若未配置请选择<strong>【密码】</strong>或<strong>【私钥】</strong>。
+                </p>
+              </div>
+            )}
             {hostForm.authType === "private_key" && (
-              <Field
-                label="私钥路径"
-                value={hostForm.privateKey}
-                set={(value) => setHostForm({ ...hostForm, privateKey: value })}
-              />
-            )}{" "}
+              <div>
+                <Field
+                  label="私钥路径"
+                  value={hostForm.privateKey}
+                  set={(value) => setHostForm({ ...hostForm, privateKey: value })}
+                />
+                <small className="field-hint">
+                  例如：C:\Users\Administrator\.ssh\id_rsa 或 /Users/name/.ssh/id_ed25519
+                </small>
+              </div>
+            )}
             {hostForm.authType === "password" && (
-              <Field
-                label="密码"
-                type="password"
-                value={hostForm.password}
-                set={(value) => setHostForm({ ...hostForm, password: value })}
-              />
-            )}{" "}
+              <div>
+                <Field
+                  label="密码"
+                  type="password"
+                  value={hostForm.password}
+                  set={(value) => setHostForm({ ...hostForm, password: value })}
+                />
+                <small className="field-hint">🔒 密码将通过系统本地安全凭据（Windows DPAPI）加密存储</small>
+              </div>
+            )}
             {formError && (
               <p className="form-error" role="alert">
                 {formError}

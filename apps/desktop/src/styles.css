@@ -224,6 +224,58 @@ p {
 .error-text {
   color: #b13a54;
   font-size: 12px;
+  margin: 0;
+  line-height: 1.45;
+}
+.error-box {
+  margin-top: 6px;
+}
+.error-action-btn {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #d93856;
+  background: #fde5ea;
+  color: #ab2b47;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-block;
+}
+:root[data-theme="dark"] .error-action-btn {
+  background: #401b24;
+  border-color: #7f3d4e;
+  color: #ff94a8;
+}
+.auth-hint-card {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f0f4f9;
+  border-left: 3px solid #3577de;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #4b5b75;
+}
+:root[data-theme="dark"] .auth-hint-card {
+  background: #172336;
+  color: #9bb0d3;
+  border-left-color: #558ee8;
+}
+.auth-hint-card p {
+  margin: 0 0 4px;
+}
+.auth-hint-card p:last-child {
+  margin-bottom: 0;
+}
+.field-hint {
+  display: block;
+  font-size: 11px;
+  color: #71809a;
+  margin-top: 4px;
+}
+:root[data-theme="dark"] .field-hint {
+  color: #8c9db8;
 }
 .actions {
   margin-top: 17px;

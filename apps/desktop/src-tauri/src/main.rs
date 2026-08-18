@@ -326,11 +326,28 @@ fn snapshot(state: &AppState) -> Result<Snapshot, String> {
             Ok(true) => {}
             Ok(false) => {
                 exited.push(name.clone());
+                let error_hint = config
+                    .tunnels
+                    .iter()
+                    .find(|t| t.name == *name)
+                    .and_then(|t| config.hosts.iter().find(|h| h.id == t.host_id))
+                    .map(|h| match h.auth.kind {
+                        AuthType::SshAgent => {
+                            "OpenSSH 进程已退出：当前服务器为【SSH Agent】认证。若本机未开启 ssh-agent 服务或未添加密钥将导致连接失败。建议在左侧编辑服务器切换为【密码】或【私钥】认证。"
+                        }
+                        AuthType::Password => {
+                            "OpenSSH 进程已退出：请检查服务器密码是否正确、用户名及端口是否可达。"
+                        }
+                        AuthType::PrivateKey => {
+                            "OpenSSH 进程已退出：请检查私钥文件路径是否存在、格式权限是否正确。"
+                        }
+                    })
+                    .unwrap_or("OpenSSH 进程已退出；请检查认证、Host Key 或网络连接");
                 statuses.insert(
                     name.clone(),
                     TunnelStatus {
                         state: "error".into(),
-                        message: Some("OpenSSH 进程已退出；请检查认证、Host Key 或网络连接".into()),
+                        message: Some(error_hint.into()),
                     },
                 );
             }

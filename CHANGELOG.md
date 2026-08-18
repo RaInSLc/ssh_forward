@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 - 转发配置本地地址支持下拉选择（`127.0.0.1`、`0.0.0.0`、`localhost`）。
 - 新建 Tunnel 支持自动探测并分配空闲随机端口，表单新增“🎲 随机”端口分配按钮。
 - 后端新增 `get_available_port` 系统空闲端口原子探测命令。
+- 添加服务器默认认证方式调整为“密码”；增加 SSH Agent 前置使用条件说明与私钥/密码输入提示。
+- Tunnel 启动失败时根据认证类型输出精准诊断指引，并在错误卡片提供一键跳转编辑服务器的快捷入口。
 - `.gitignore` 增加 `.tauri/` 和私钥文件隔离规则。
 
 ### Fixed
