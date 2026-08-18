@@ -30,6 +30,14 @@ pub struct Settings {
     pub strict_host_key_checking: bool,
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_seconds: u16,
+    #[serde(default = "default_server_alive_interval")]
+    pub server_alive_interval_seconds: u16,
+    #[serde(default = "default_server_alive_count_max")]
+    pub server_alive_count_max: u16,
+    #[serde(default = "default_true")]
+    pub tcp_keep_alive: bool,
+    #[serde(default)]
+    pub compression: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +45,10 @@ impl Default for Settings {
         Self {
             strict_host_key_checking: true,
             connect_timeout_seconds: default_connect_timeout(),
+            server_alive_interval_seconds: default_server_alive_interval(),
+            server_alive_count_max: default_server_alive_count_max(),
+            tcp_keep_alive: true,
+            compression: false,
         }
     }
 }
@@ -46,6 +58,12 @@ fn default_true() -> bool {
 }
 fn default_connect_timeout() -> u16 {
     10
+}
+fn default_server_alive_interval() -> u16 {
+    15
+}
+fn default_server_alive_count_max() -> u16 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +76,18 @@ pub struct Host {
     pub username: String,
     #[serde(default)]
     pub auth: Auth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_host_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identities_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<bool>,
+    #[serde(default)]
+    pub custom_options: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -95,7 +125,12 @@ pub struct Tunnel {
     #[serde(rename = "type")]
     pub kind: TunnelType,
     pub local: Endpoint,
-    pub remote: Endpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<Endpoint>,
+    #[serde(default)]
+    pub gateway_ports: bool,
+    #[serde(default)]
+    pub custom_options: Vec<String>,
     #[serde(default)]
     pub auto_start: bool,
     #[serde(default = "default_true")]
@@ -110,6 +145,8 @@ pub struct Tunnel {
 #[serde(rename_all = "snake_case")]
 pub enum TunnelType {
     Local,
+    Dynamic,
+    Remote,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

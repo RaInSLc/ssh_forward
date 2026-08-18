@@ -11,10 +11,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use ssh_forward_config::{Auth, AuthType, Config, Endpoint, Host, Tunnel, load, validate};
-use ssh_forward_core::{
-    add_host_with_auth, add_tunnel, remove_host, remove_tunnel, start_tunnel_with_password,
-    update_host, update_tunnel,
-};
+use ssh_forward_core::{remove_host, remove_tunnel, start_tunnel_with_password, update_tunnel};
 use ssh_forward_ssh::OpenSshForward;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -59,6 +56,12 @@ struct HostInput {
     auth_type: AuthType,
     private_key: Option<String>,
     password: Option<String>,
+    jump_host_id: Option<String>,
+    proxy_command: Option<String>,
+    identities_only: Option<bool>,
+    certificate_file: Option<String>,
+    compression: Option<bool>,
+    custom_options: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -66,11 +69,30 @@ struct HostInput {
 struct TunnelInput {
     name: String,
     host_name: String,
+    #[serde(default = "default_tunnel_type")]
+    kind: ssh_forward_config::TunnelType,
     local_host: String,
     local_port: u16,
-    remote_host: String,
-    remote_port: u16,
+    remote_host: Option<String>,
+    remote_port: Option<u16>,
+    gateway_ports: Option<bool>,
+    custom_options: Option<Vec<String>>,
     auto_open_browser: bool,
+}
+
+fn default_tunnel_type() -> ssh_forward_config::TunnelType {
+    ssh_forward_config::TunnelType::Local
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsInput {
+    strict_host_key_checking: bool,
+    connect_timeout_seconds: u16,
+    server_alive_interval_seconds: u16,
+    server_alive_count_max: u16,
+    tcp_keep_alive: bool,
+    compression: bool,
 }
 
 use serde::Deserialize;
@@ -412,17 +434,52 @@ fn validate_config(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn save_settings(
+    input: SettingsInput,
+    state: State<'_, AppState>,
+) -> Result<ssh_forward_config::Settings, String> {
+    let path = config_path(&state)?;
+    let mut config = load(&path).map_err(|e| e.to_string())?;
+    config.settings = ssh_forward_config::Settings {
+        strict_host_key_checking: input.strict_host_key_checking,
+        connect_timeout_seconds: input.connect_timeout_seconds,
+        server_alive_interval_seconds: input.server_alive_interval_seconds,
+        server_alive_count_max: input.server_alive_count_max,
+        tcp_keep_alive: input.tcp_keep_alive,
+        compression: input.compression,
+    };
+    validate(&config).map_err(|e| e.to_string())?;
+    ssh_forward_config::save(&path, &config).map_err(|e| e.to_string())?;
+    Ok(config.settings)
+}
+
+#[tauri::command]
 fn create_host(input: HostInput, state: State<'_, AppState>) -> Result<Host, String> {
     let auth = build_auth(&input, None)?;
-    add_host_with_auth(
-        &config_path(&state)?,
-        input.name,
-        input.hostname,
-        input.port,
-        input.username,
+    let path = config_path(&state)?;
+    let mut config = load(&path).map_err(|e| e.to_string())?;
+    if config.hosts.iter().any(|h| h.name == input.name) {
+        return Err(format!("已存在名为 '{}' 的服务器", input.name));
+    }
+    let host = Host {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: input.name,
+        hostname: input.hostname,
+        port: input.port,
+        username: input.username,
         auth,
-    )
-    .map_err(|error| error.to_string())
+        jump_host_id: input.jump_host_id.filter(|s| !s.trim().is_empty()),
+        proxy_command: input.proxy_command.filter(|s| !s.trim().is_empty()),
+        identities_only: input.identities_only,
+        certificate_file: input.certificate_file.filter(|s| !s.trim().is_empty()),
+        compression: input.compression,
+        custom_options: input.custom_options.unwrap_or_default(),
+        enabled: true,
+    };
+    config.hosts.push(host.clone());
+    validate(&config).map_err(|e| e.to_string())?;
+    ssh_forward_config::save(&path, &config).map_err(|e| e.to_string())?;
+    Ok(host)
 }
 
 #[tauri::command]
@@ -431,27 +488,34 @@ fn edit_host(
     input: HostInput,
     state: State<'_, AppState>,
 ) -> Result<Host, String> {
-    let config = snapshot(&state)?.config;
-    let existing = config
+    let path = config_path(&state)?;
+    let mut config = load(&path).map_err(|e| e.to_string())?;
+    let index = config
         .hosts
         .iter()
-        .find(|host| host.name == original_name)
+        .position(|host| host.name == original_name)
         .ok_or("未找到服务器")?;
+    let existing = &config.hosts[index];
     let auth = build_auth(&input, Some(existing))?;
-    update_host(
-        &config_path(&state)?,
-        &original_name,
-        Host {
-            id: existing.id.clone(),
-            name: input.name,
-            hostname: input.hostname,
-            port: input.port,
-            username: input.username,
-            auth,
-            enabled: true,
-        },
-    )
-    .map_err(|error| error.to_string())
+    let host = Host {
+        id: existing.id.clone(),
+        name: input.name,
+        hostname: input.hostname,
+        port: input.port,
+        username: input.username,
+        auth,
+        jump_host_id: input.jump_host_id.filter(|s| !s.trim().is_empty()),
+        proxy_command: input.proxy_command.filter(|s| !s.trim().is_empty()),
+        identities_only: input.identities_only,
+        certificate_file: input.certificate_file.filter(|s| !s.trim().is_empty()),
+        compression: input.compression,
+        custom_options: input.custom_options.unwrap_or_default(),
+        enabled: existing.enabled,
+    };
+    config.hosts[index] = host.clone();
+    validate(&config).map_err(|e| e.to_string())?;
+    ssh_forward_config::save(&path, &config).map_err(|e| e.to_string())?;
+    Ok(host)
 }
 
 #[tauri::command]
@@ -461,18 +525,29 @@ fn delete_host(name: String, state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn create_tunnel(input: TunnelInput, state: State<'_, AppState>) -> Result<Tunnel, String> {
-    add_tunnel(
+    let remote = match input.kind {
+        ssh_forward_config::TunnelType::Dynamic => None,
+        ssh_forward_config::TunnelType::Local | ssh_forward_config::TunnelType::Remote => {
+            let remote_host = input.remote_host.ok_or("远端目标主机不能为空")?;
+            let remote_port = input.remote_port.ok_or("远端目标端口不能为空")?;
+            Some(Endpoint {
+                host: remote_host,
+                port: remote_port,
+            })
+        }
+    };
+    ssh_forward_core::add_tunnel_full(
         &config_path(&state)?,
         input.name,
         &input.host_name,
+        input.kind,
         Endpoint {
             host: input.local_host,
             port: input.local_port,
         },
-        Endpoint {
-            host: input.remote_host,
-            port: input.remote_port,
-        },
+        remote,
+        input.gateway_ports.unwrap_or(false),
+        input.custom_options.unwrap_or_default(),
         input.auto_open_browser,
     )
     .map_err(|error| error.to_string())
@@ -498,6 +573,17 @@ fn edit_tunnel(
     {
         return Err("请先停止 Tunnel 再编辑".into());
     }
+    let remote = match input.kind {
+        ssh_forward_config::TunnelType::Dynamic => None,
+        ssh_forward_config::TunnelType::Local | ssh_forward_config::TunnelType::Remote => {
+            let remote_host = input.remote_host.ok_or("远端目标主机不能为空")?;
+            let remote_port = input.remote_port.ok_or("远端目标端口不能为空")?;
+            Some(Endpoint {
+                host: remote_host,
+                port: remote_port,
+            })
+        }
+    };
     update_tunnel(
         &config_path(&state)?,
         &original_name,
@@ -505,15 +591,14 @@ fn edit_tunnel(
             id: existing.id,
             name: input.name,
             host_id: existing.host_id,
-            kind: existing.kind,
+            kind: input.kind,
             local: Endpoint {
                 host: input.local_host,
                 port: input.local_port,
             },
-            remote: Endpoint {
-                host: input.remote_host,
-                port: input.remote_port,
-            },
+            remote,
+            gateway_ports: input.gateway_ports.unwrap_or(false),
+            custom_options: input.custom_options.unwrap_or_default(),
             auto_start: existing.auto_start,
             auto_reconnect: existing.auto_reconnect,
             auto_open_browser: input.auto_open_browser,
@@ -685,6 +770,7 @@ fn main() {
             get_available_port,
             set_config_path,
             validate_config,
+            save_settings,
             create_host,
             edit_host,
             delete_host,

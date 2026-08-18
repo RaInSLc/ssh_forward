@@ -49,6 +49,14 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
         require_nonempty(&host.hostname, "host hostname")?;
         require_nonempty(&host.username, "host username")?;
         require_port(host.port, "host port")?;
+        if let Some(jump_id) = &host.jump_host_id
+            && jump_id == &host.id
+        {
+            return Err(ConfigError::Validation(format!(
+                "host '{}' cannot reference itself as jump_host_id",
+                host.name
+            )));
+        }
         if host.auth.kind == AuthType::PrivateKey {
             match &host.auth.private_key {
                 Some(path) if !path.trim().is_empty() => {}
@@ -79,15 +87,19 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
             }
         }
     }
+    for host in &config.hosts {
+        if let Some(jump_id) = &host.jump_host_id
+            && !host_ids.contains(jump_id.as_str())
+        {
+            return Err(ConfigError::Validation(format!(
+                "host '{}' references unknown jump_host_id '{jump_id}'",
+                host.name
+            )));
+        }
+    }
     for tunnel in &config.tunnels {
         require_id(&mut ids, &tunnel.id, "tunnel")?;
         require_nonempty(&tunnel.name, "tunnel name")?;
-        if tunnel.kind != TunnelType::Local {
-            return Err(ConfigError::Validation(format!(
-                "tunnel '{}' has an unsupported type",
-                tunnel.name
-            )));
-        }
         if !host_ids.contains(tunnel.host_id.as_str()) {
             return Err(ConfigError::Validation(format!(
                 "tunnel '{}' references unknown host_id '{}'",
@@ -95,12 +107,31 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
         require_nonempty(&tunnel.local.host, "local host")?;
-        require_nonempty(&tunnel.remote.host, "remote host")?;
         require_port(tunnel.local.port, "local port")?;
-        require_port(tunnel.remote.port, "remote port")?;
-        if tunnel.local.host != "127.0.0.1" && tunnel.local.host != "::1" {
+
+        match tunnel.kind {
+            TunnelType::Local | TunnelType::Remote => {
+                let remote = tunnel.remote.as_ref().ok_or_else(|| {
+                    ConfigError::Validation(format!(
+                        "tunnel '{}' is {:?} but missing remote endpoint",
+                        tunnel.name, tunnel.kind
+                    ))
+                })?;
+                require_nonempty(&remote.host, "remote host")?;
+                require_port(remote.port, "remote port")?;
+            }
+            TunnelType::Dynamic => {
+                // Dynamic SOCKS5 只需绑定本地端口，远端无需单独配置
+            }
+        }
+
+        if tunnel.local.host != "127.0.0.1"
+            && tunnel.local.host != "::1"
+            && tunnel.local.host != "localhost"
+            && tunnel.local.host != "0.0.0.0"
+        {
             return Err(ConfigError::Validation(format!(
-                "tunnel '{}' binds to '{}'; V0.1 only permits loopback addresses",
+                "tunnel '{}' binds to unsupported address '{}'",
                 tunnel.name, tunnel.local.host
             )));
         }

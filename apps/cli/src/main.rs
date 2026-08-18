@@ -164,14 +164,18 @@ fn run(cli: Cli) -> Result<()> {
                     .find(|host| host.id == tunnel.host_id)
                     .map(|host| host.name.as_str())
                     .unwrap_or("<missing>");
+                let remote_str = tunnel
+                    .remote
+                    .as_ref()
+                    .map(|r| format!("{}:{}", r.host, r.port))
+                    .unwrap_or_else(|| "-".into());
                 println!(
-                    "{}\t{}\t{}:{}\t{}:{}\t{:?}",
+                    "{}\t{}\t{}:{}\t{}\t{:?}",
                     tunnel.name,
                     host,
                     tunnel.local.host,
                     tunnel.local.port,
-                    tunnel.remote.host,
-                    tunnel.remote.port,
+                    remote_str,
                     tunnel.kind
                 );
             }
@@ -184,7 +188,7 @@ fn run(cli: Cli) -> Result<()> {
                 arguments.name,
                 &arguments.host,
                 arguments.local,
-                arguments.remote,
+                Some(arguments.remote),
                 false,
             )?;
             println!("Added tunnel '{}' ({})", tunnel.name, tunnel.id);

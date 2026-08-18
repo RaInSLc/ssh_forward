@@ -85,7 +85,9 @@ mod tests {
             host_id: "missing".into(),
             kind: TunnelType::Local,
             local: Endpoint::localhost(13306),
-            remote: Endpoint::localhost(3306),
+            remote: Some(Endpoint::localhost(3306)),
+            gateway_ports: false,
+            custom_options: Vec::new(),
             auto_start: false,
             auto_reconnect: true,
             auto_open_browser: false,
@@ -109,6 +111,12 @@ mod tests {
                 credential_id: None,
                 encrypted_password: Some("encrypted-value".into()),
             },
+            jump_host_id: None,
+            proxy_command: None,
+            identities_only: None,
+            certificate_file: None,
+            compression: None,
+            custom_options: Vec::new(),
             enabled: true,
         });
         validate(&config).unwrap();
@@ -132,6 +140,12 @@ mod tests {
                 credential_id: Some("legacy-credential".into()),
                 encrypted_password: None,
             },
+            jump_host_id: None,
+            proxy_command: None,
+            identities_only: None,
+            certificate_file: None,
+            compression: None,
+            custom_options: Vec::new(),
             enabled: true,
         });
         validate(&config).unwrap();

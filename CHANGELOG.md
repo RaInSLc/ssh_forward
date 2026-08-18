@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.14] - 2026-08-18
+
+### Added
+- **连接保活与高可用防假死**：引入 `ServerAliveInterval`（默认 15s）、`ServerAliveCountMax`（默认 3 次）与 `TCPKeepAlive`（默认开启），彻底解决 NAT/防火墙静默丢包导致的 SSH 假死。
+- **动态端口转发 (SOCKS5 代理 `-D`)**：新增 `Dynamic` 隧道模式，仅需在本地指定端口即可建立全功能 SOCKS5 代理网关，直接访问远程全网服务。
+- **远程反向端口转发 (`-R`)**：新增 `Remote` 隧道模式，支持内网穿透将本地服务端口暴露到公网服务器。
+- **跳板机与代理穿透**：主机支持关联级联跳板机（`ProxyJump` / `-J`）与自定义前置代理命令（`ProxyCommand`）。
+- **局域网共享支持**：支持 `GatewayPorts` / 绑定 `0.0.0.0`，允许局域网同伴设备直接访问转发端口。
+- **认证隔离与安全进阶**：支持 `IdentitiesOnly=yes`（避免遍历 SSH-Agent 触发认证次数超限）及 CA 签发的用户证书认证（`CertificateFile`）。
+- **传输性能优化**：支持数据流压缩（`Compression` / `-C`），提升高延迟/弱网传输速率。
+- **自定义 OpenSSH 参数透传**：主机和隧道均支持配置任意自定义 `-o Option=Value` 参数列表。
+- **界面与交互重塑**：新增模式分段切换、折叠式高级设置 Accordion、全局网络设置抽屉及彩色模式徽章。
+
 ## [0.1.13] - 2026-08-17
 
 ### Added

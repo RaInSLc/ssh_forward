@@ -4,7 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
 type AuthType = "ssh_agent" | "private_key" | "password";
+type TunnelType = "local" | "dynamic" | "remote";
 type Theme = "light" | "dark";
+
 type Host = {
   id: string;
   name: string;
@@ -12,29 +14,55 @@ type Host = {
   port: number;
   username: string;
   auth: { type: AuthType; private_key?: string };
+  jump_host_id?: string;
+  proxy_command?: string;
+  identities_only?: boolean;
+  certificate_file?: string;
+  compression?: boolean;
+  custom_options?: string[];
   enabled: boolean;
 };
+
 type Endpoint = { host: string; port: number };
+
 type Tunnel = {
   id: string;
   name: string;
   host_id: string;
-  type: "local";
+  type: TunnelType;
   local: Endpoint;
-  remote: Endpoint;
+  remote?: Endpoint;
+  gateway_ports?: boolean;
+  custom_options?: string[];
   auto_open_browser: boolean;
   enabled: boolean;
 };
+
+type Settings = {
+  strict_host_key_checking: boolean;
+  connect_timeout_seconds: number;
+  server_alive_interval_seconds: number;
+  server_alive_count_max: number;
+  tcp_keep_alive: boolean;
+  compression: boolean;
+};
+
 type Status = {
   state: "stopped" | "starting" | "running" | "error";
   message?: string;
 };
+
 type Snapshot = {
   path: string;
   version?: string;
-  config: { hosts: Host[]; tunnels: Tunnel[] };
+  config: {
+    settings: Settings;
+    hosts: Host[];
+    tunnels: Tunnel[];
+  };
   statuses: Record<string, Status>;
 };
+
 type HostForm = {
   name: string;
   hostname: string;
@@ -43,18 +71,38 @@ type HostForm = {
   authType: AuthType;
   privateKey: string;
   password: string;
+  jumpHostId: string;
+  proxyCommand: string;
+  identitiesOnly: boolean;
+  certificateFile: string;
+  compression: boolean;
+  customOptionsText: string;
 };
+
 type TunnelForm = {
   name: string;
   hostName: string;
+  kind: TunnelType;
   localHost: string;
   localPort: number;
   remoteHost: string;
   remotePort: number;
+  gatewayPorts: boolean;
   autoOpenBrowser: boolean;
+  customOptionsText: string;
+};
+
+type SettingsForm = {
+  strictHostKeyChecking: boolean;
+  connectTimeoutSeconds: number;
+  serverAliveIntervalSeconds: number;
+  serverAliveCountMax: number;
+  tcpKeepAlive: boolean;
+  compression: boolean;
 };
 
 const repositoryUrl = "https://github.com/RaInSLc/ssh_forward";
+
 const newHost = (): HostForm => ({
   name: "",
   hostname: "",
@@ -63,16 +111,36 @@ const newHost = (): HostForm => ({
   authType: "password",
   privateKey: "",
   password: "",
+  jumpHostId: "",
+  proxyCommand: "",
+  identitiesOnly: true,
+  certificateFile: "",
+  compression: false,
+  customOptionsText: "",
 });
+
 const newTunnel = (): TunnelForm => ({
   name: "",
   hostName: "",
+  kind: "local",
   localHost: "127.0.0.1",
   localPort: 18888,
   remoteHost: "127.0.0.1",
   remotePort: 8888,
+  gatewayPorts: false,
   autoOpenBrowser: false,
+  customOptionsText: "",
 });
+
+const newSettings = (): SettingsForm => ({
+  strictHostKeyChecking: true,
+  connectTimeoutSeconds: 10,
+  serverAliveIntervalSeconds: 15,
+  serverAliveCountMax: 3,
+  tcpKeepAlive: true,
+  compression: false,
+});
+
 const storedTheme = (): Theme =>
   localStorage.getItem("ssh-forward-theme") === "dark" ? "dark" : "light";
 
@@ -91,14 +159,18 @@ export default function App() {
   const [notice, setNotice] = useState("正在加载配置...");
   const [hostForm, setHostForm] = useState<HostForm>(newHost);
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(newTunnel);
+  const [settingsForm, setSettingsForm] = useState<SettingsForm>(newSettings);
   const [hostEditing, setHostEditing] = useState<string | null>(null);
   const [tunnelEditing, setTunnelEditing] = useState<string | null>(null);
-  const [panel, setPanel] = useState<"host" | "tunnel" | null>(null);
+  const [panel, setPanel] = useState<"host" | "tunnel" | "settings" | null>(null);
+  const [showAdvancedHost, setShowAdvancedHost] = useState(false);
+  const [showAdvancedTunnel, setShowAdvancedTunnel] = useState(false);
   const [formError, setFormError] = useState("");
   const [aboutOpen, setAboutOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(storedTheme);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const appVersion = snapshot?.version ?? "0.1.11";
+  const appVersion = snapshot?.version ?? "0.1.14";
 
   const [updateAvailable, setUpdateAvailable] = useState<Update | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -128,7 +200,9 @@ export default function App() {
         errStr.includes("not found")
       ) {
         setUpdateAvailable(null);
-        setUpdateMessage(`当前已是最新版本 (v${appVersion})`);
+        if (manual) {
+          setUpdateMessage(`当前已是最新版本 (v${appVersion})`);
+        }
       } else {
         console.error("检查更新失败", error);
         if (manual) {
@@ -174,27 +248,41 @@ export default function App() {
     }
   };
 
-  const load = async () => {
+  const loadData = async () => {
     try {
-      setSnapshot(await invoke<Snapshot>("get_snapshot"));
+      const res = await invoke<Snapshot>("get_snapshot");
+      setSnapshot(res);
+      if (res.config?.settings) {
+        setSettingsForm({
+          strictHostKeyChecking: res.config.settings.strict_host_key_checking ?? true,
+          connectTimeoutSeconds: res.config.settings.connect_timeout_seconds ?? 10,
+          serverAliveIntervalSeconds: res.config.settings.server_alive_interval_seconds ?? 15,
+          serverAliveCountMax: res.config.settings.server_alive_count_max ?? 3,
+          tcpKeepAlive: res.config.settings.tcp_keep_alive ?? true,
+          compression: res.config.settings.compression ?? false,
+        });
+      }
     } catch (error) {
       setNotice(String(error));
     }
   };
+
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(), 1500);
+    void loadData();
+    const timer = window.setInterval(() => void loadData(), 1500);
     return () => window.clearInterval(timer);
   }, []);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("ssh-forward-theme", theme);
   }, [theme]);
+
   const action = async (command: string, payload: Record<string, unknown>) => {
     try {
       await invoke(command, payload);
       setNotice("操作完成");
-      await load();
+      await loadData();
       return "";
     } catch (error) {
       const message = String(error);
@@ -202,6 +290,7 @@ export default function App() {
       return message;
     }
   };
+
   const deleteHost = async (name: string) => {
     const host = snapshot?.config.hosts.find((item) => item.name === name);
     if (host) {
@@ -227,6 +316,7 @@ export default function App() {
       setHostForm(newHost());
     }
   };
+
   const deleteTunnel = async (name: string) => {
     if (!window.confirm(`确定要删除 Tunnel“${name}”吗？`)) {
       return;
@@ -240,14 +330,29 @@ export default function App() {
       setTunnelForm(newTunnel());
     }
   };
+
   const saveHost = async (event: FormEvent) => {
     event.preventDefault();
     setFormError("");
+    const customOptions = hostForm.customOptionsText
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const input = {
-      ...hostForm,
+      name: hostForm.name,
+      hostname: hostForm.hostname,
       port: Number(hostForm.port),
+      username: hostForm.username,
+      authType: hostForm.authType,
       password: hostForm.password || null,
       privateKey: hostForm.privateKey || null,
+      jumpHostId: hostForm.jumpHostId || null,
+      proxyCommand: hostForm.proxyCommand || null,
+      identitiesOnly: hostForm.identitiesOnly,
+      certificateFile: hostForm.certificateFile || null,
+      compression: hostForm.compression,
+      customOptions: customOptions.length ? customOptions : null,
     };
     const error = await action(
       hostEditing ? "edit_host" : "create_host",
@@ -261,13 +366,27 @@ export default function App() {
       setHostForm(newHost());
     }
   };
+
   const saveTunnel = async (event: FormEvent) => {
     event.preventDefault();
     setFormError("");
+    const customOptions = tunnelForm.customOptionsText
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const isDynamic = tunnelForm.kind === "dynamic";
     const input = {
-      ...tunnelForm,
+      name: tunnelForm.name,
+      hostName: tunnelForm.hostName,
+      kind: tunnelForm.kind,
+      localHost: tunnelForm.localHost,
       localPort: Number(tunnelForm.localPort),
-      remotePort: Number(tunnelForm.remotePort),
+      remoteHost: isDynamic ? null : tunnelForm.remoteHost,
+      remotePort: isDynamic ? null : Number(tunnelForm.remotePort),
+      gatewayPorts: tunnelForm.gatewayPorts,
+      customOptions: customOptions.length ? customOptions : null,
+      autoOpenBrowser: isDynamic ? false : tunnelForm.autoOpenBrowser,
     };
     const error = await action(
       tunnelEditing ? "edit_tunnel" : "create_tunnel",
@@ -281,16 +400,47 @@ export default function App() {
       setTunnelForm(newTunnel());
     }
   };
+
+  const saveGlobalSettings = async (event: FormEvent) => {
+    event.preventDefault();
+    setFormError("");
+    const input = {
+      strictHostKeyChecking: settingsForm.strictHostKeyChecking,
+      connectTimeoutSeconds: Number(settingsForm.connectTimeoutSeconds),
+      serverAliveIntervalSeconds: Number(settingsForm.serverAliveIntervalSeconds),
+      serverAliveCountMax: Number(settingsForm.serverAliveCountMax),
+      tcpKeepAlive: settingsForm.tcpKeepAlive,
+      compression: settingsForm.compression,
+    };
+    const error = await action("save_settings", { input });
+    if (error) {
+      setFormError(`保存设置失败：${error}`);
+    } else {
+      setPanel(null);
+    }
+  };
+
   const hosts = snapshot?.config.hosts ?? [];
   const tunnels = snapshot?.config.tunnels ?? [];
   const statuses = snapshot?.statuses ?? {};
+
   const closePanel = () => {
     setFormError("");
     setPanel(null);
   };
+
   const openHost = (host?: Host) => {
     setFormError("");
     setHostEditing(host?.name ?? null);
+    setShowAdvancedHost(
+      Boolean(
+        host?.jump_host_id ||
+          host?.proxy_command ||
+          host?.certificate_file ||
+          host?.compression ||
+          host?.custom_options?.length
+      )
+    );
     setHostForm(
       host
         ? {
@@ -301,24 +451,37 @@ export default function App() {
             authType: host.auth.type,
             privateKey: host.auth.private_key ?? "",
             password: "",
+            jumpHostId: host.jump_host_id ?? "",
+            proxyCommand: host.proxy_command ?? "",
+            identitiesOnly: host.identities_only ?? true,
+            certificateFile: host.certificate_file ?? "",
+            compression: host.compression ?? false,
+            customOptionsText: (host.custom_options ?? []).join("\n"),
           }
         : newHost()
     );
     setPanel("host");
   };
+
   const openTunnel = async (tunnel?: Tunnel) => {
     setFormError("");
     const host = tunnel && hosts.find((item) => item.id === tunnel.host_id);
     setTunnelEditing(tunnel?.name ?? null);
+    setShowAdvancedTunnel(
+      Boolean(tunnel?.gateway_ports || tunnel?.custom_options?.length)
+    );
     if (tunnel) {
       setTunnelForm({
         name: tunnel.name,
         hostName: host?.name ?? "",
+        kind: tunnel.type ?? "local",
         localHost: tunnel.local.host,
         localPort: tunnel.local.port,
-        remoteHost: tunnel.remote.host,
-        remotePort: tunnel.remote.port,
-        autoOpenBrowser: tunnel.auto_open_browser,
+        remoteHost: tunnel.remote?.host ?? "127.0.0.1",
+        remotePort: tunnel.remote?.port ?? 8888,
+        gatewayPorts: tunnel.gateway_ports ?? false,
+        autoOpenBrowser: tunnel.auto_open_browser ?? false,
+        customOptionsText: (tunnel.custom_options ?? []).join("\n"),
       });
     } else {
       const defaultForm = newTunnel();
@@ -328,6 +491,18 @@ export default function App() {
     }
     setPanel("tunnel");
   };
+
+  const openSettings = () => {
+    setFormError("");
+    setPanel("settings");
+  };
+
+  const copyToClipboard = (text: string, id: string) => {
+    void navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
   return (
     <main>
       <aside>
@@ -335,10 +510,15 @@ export default function App() {
           <span>SF</span>
           <div>
             <strong>SSH Forward</strong>
-            <small>本地端口转发</small>
+            <small>专业 SSH 转发与代理客户端</small>
           </div>
         </div>
-        <p className="eyebrow">HOSTS</p>
+        <div className="sidebar-section-header">
+          <p className="eyebrow">HOSTS / 服务器列表</p>
+          <button className="icon-btn" title="添加服务器" onClick={() => openHost()}>
+            +
+          </button>
+        </div>
         <div className="host-list">
           {hosts.map((host) => (
             <button
@@ -350,15 +530,26 @@ export default function App() {
               <span>
                 <b>{host.name}</b>
                 <small>
-                  {host.username}@{host.hostname}
+                  {host.username}@{host.hostname}:{host.port}
                 </small>
+                {host.jump_host_id && (
+                  <span className="mini-badge">🦘 跳板机</span>
+                )}
               </span>
             </button>
           ))}
+          {!hosts.length && (
+            <div className="empty-sidebar">点击下方按钮添加首个 SSH 服务器</div>
+          )}
         </div>
-        <button className="outline" onClick={() => openHost()}>
+        <button className="outline add-host-btn" onClick={() => openHost()}>
           + 添加服务器
         </button>
+
+        <button className="settings-link-btn" onClick={openSettings}>
+          ⚙️ 全局网络与保活设置
+        </button>
+
         <footer>
           <span>{notice}</span>
           <span className="config-path" title={snapshot?.path}>
@@ -369,10 +560,11 @@ export default function App() {
           </button>
         </footer>
       </aside>
+
       <section className="workspace">
         <header>
           <div>
-            <p className="eyebrow">LOCAL FORWARDS</p>
+            <p className="eyebrow">FORWARDS & PROXY / 转发与代理</p>
             <h1>转发控制台</h1>
           </div>
           <div className="header-actions">
@@ -380,70 +572,145 @@ export default function App() {
               className="theme-toggle"
               onClick={() => setTheme(theme === "light" ? "dark" : "light")}
             >
-              {theme === "light" ? "夜间模式" : "日间模式"}
+              {theme === "light" ? "🌙 夜间" : "☀️ 日间"}
             </button>
             <button
               className="primary"
               disabled={!hosts.length}
               onClick={() => openTunnel()}
             >
-              + 新建 Tunnel
+              + 新建 Tunnel / 代理
             </button>
           </div>
         </header>
+
         <div className="tunnels">
           {tunnels.map((tunnel) => {
             const status = statuses[tunnel.name] ?? {
               state: "stopped" as const,
             };
             const running = status.state === "running";
+            const host = hosts.find((h) => h.id === tunnel.host_id);
+            const isDynamic = tunnel.type === "dynamic";
+            const isRemote = tunnel.type === "remote";
+            const socksAddress = `socks5://${tunnel.local.host}:${tunnel.local.port}`;
+            const localAddress = `http://${tunnel.local.host}:${tunnel.local.port}`;
+
             return (
-              <article key={tunnel.id}>
+              <article key={tunnel.id} className={`tunnel-card ${tunnel.type}`}>
                 <div className="tunnel-head">
                   <div>
-                    <h2>{tunnel.name}</h2>
-                    <p>
-                      {tunnel.local.host}:{tunnel.local.port} <span>→</span>{" "}
-                      {tunnel.remote.host}:{tunnel.remote.port}
-                    </p>
+                    <div className="tunnel-title-row">
+                      <h2>{tunnel.name}</h2>
+                      <span className={`mode-badge ${tunnel.type}`}>
+                        {isDynamic
+                          ? "SOCKS5 动态代理"
+                          : isRemote
+                          ? "Remote 反向穿透"
+                          : "Local 本地转发"}
+                      </span>
+                      {tunnel.gateway_ports && (
+                        <span className="mode-badge gateway">局域网共享</span>
+                      )}
+                    </div>
+
+                    <div className="tunnel-route">
+                      {isDynamic ? (
+                        <div className="route-desc">
+                          <span>代理端口：</span>
+                          <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                          <span className="route-arrow">→</span>
+                          <span className="route-dest">
+                            远程服务器 <code>{host?.hostname ?? "未知"}</code> 完整网络
+                          </span>
+                        </div>
+                      ) : isRemote ? (
+                        <div className="route-desc">
+                          <span>远端公网端口：</span>
+                          <strong>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</strong>
+                          <span className="route-arrow">→</span>
+                          <span>本地服务：</span>
+                          <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                        </div>
+                      ) : (
+                        <div className="route-desc">
+                          <span>本地：</span>
+                          <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                          <span className="route-arrow">→</span>
+                          <span>远端目标：</span>
+                          <strong>{tunnel.remote?.host}:{tunnel.remote?.port}</strong>
+                        </div>
+                      )}
+                    </div>
                   </div>
+
                   <span className={`status ${status.state}`}>
                     {running
                       ? "运行中"
                       : status.state === "error"
-                        ? "错误"
-                        : "已停止"}
+                      ? "异常"
+                      : "已停止"}
                   </span>
                 </div>
+
                 {status.message && (
                   <div className="error-box">
                     <p className="error-text">{status.message}</p>
-                    {(() => {
-                      const host = hosts.find((h) => h.id === tunnel.host_id);
-                      return host ? (
-                        <button
-                          type="button"
-                          className="error-action-btn"
-                          onClick={() => openHost(host)}
-                        >
-                          ⚙️ 去修改服务器“{host.name}”的认证方式
-                        </button>
-                      ) : null;
-                    })()}
+                    {host && (
+                      <button
+                        type="button"
+                        className="error-action-btn"
+                        onClick={() => openHost(host)}
+                      >
+                        ⚙️ 去修改服务器“{host.name}”的设置
+                      </button>
+                    )}
                   </div>
                 )}
+
                 <div className="actions">
+                  {isDynamic ? (
+                    <button
+                      disabled={!running}
+                      onClick={() => copyToClipboard(socksAddress, `socks-${tunnel.id}`)}
+                    >
+                      {copiedId === `socks-${tunnel.id}` ? "✓ 已复制 SOCKS5 地址" : "📋 复制代理地址"}
+                    </button>
+                  ) : isRemote ? (
+                    <button
+                      disabled={!running}
+                      onClick={() =>
+                        copyToClipboard(
+                          `${host?.hostname ?? "服务器IP"}:${tunnel.remote?.port}`,
+                          `remote-${tunnel.id}`
+                        )
+                      }
+                    >
+                      {copiedId === `remote-${tunnel.id}` ? "✓ 已复制公网地址" : "📋 复制公网访问地址"}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        disabled={!running}
+                        onClick={() =>
+                          void action("open_tunnel_in_browser", {
+                            name: tunnel.name,
+                          })
+                        }
+                      >
+                        打开浏览器
+                      </button>
+                      <button
+                        disabled={!running}
+                        onClick={() => copyToClipboard(localAddress, `local-${tunnel.id}`)}
+                      >
+                        {copiedId === `local-${tunnel.id}` ? "✓ 已复制" : "复制地址"}
+                      </button>
+                    </>
+                  )}
+
                   <button
-                    disabled={!running}
-                    onClick={() =>
-                      void action("open_tunnel_in_browser", {
-                        name: tunnel.name,
-                      })
-                    }
-                  >
-                    打开浏览器
-                  </button>
-                  <button
+                    className={running ? "btn-stop" : "btn-start"}
                     onClick={() =>
                       void action(running ? "stop_tunnel" : "start_tunnel", {
                         name: tunnel.name,
@@ -466,12 +733,14 @@ export default function App() {
 
           {!tunnels.length && (
             <div className="zero">
-              <h2>还没有 Tunnel</h2>
-              <p>添加服务器后，新建一条本地转发。</p>
+              <h2>还没有创建 Tunnel</h2>
+              <p>点击上方“+ 新建 Tunnel / 代理”，建立本地端口转发、SOCKS5 代理或远程穿透。</p>
             </div>
           )}
         </div>
       </section>
+
+      {/* 服务器设置弹窗 */}
       {panel === "host" && (
         <Modal
           title={hostEditing ? "编辑服务器" : "添加服务器"}
@@ -479,12 +748,12 @@ export default function App() {
         >
           <form onSubmit={saveHost}>
             <Field
-              label="名称"
+              label="名称 (用于区分识别)"
               value={hostForm.name}
               set={(value) => setHostForm({ ...hostForm, name: value })}
             />
             <Field
-              label="服务器地址"
+              label="服务器主机地址 (IP 或域名)"
               value={hostForm.hostname}
               set={(value) => setHostForm({ ...hostForm, hostname: value })}
             />
@@ -498,7 +767,7 @@ export default function App() {
                 }
               />
               <Field
-                label="用户名"
+                label="SSH 用户名"
                 value={hostForm.username}
                 set={(value) => setHostForm({ ...hostForm, username: value })}
               />
@@ -515,17 +784,18 @@ export default function App() {
                 }
               >
                 <option value="password">密码 (推荐常规使用)</option>
-                <option value="private_key">私钥文件 (.pem / id_rsa)</option>
+                <option value="private_key">私钥文件 (.pem / id_rsa / id_ed25519)</option>
                 <option value="ssh_agent">SSH Agent (系统后台密钥代理)</option>
               </select>
             </label>
+
             {hostForm.authType === "ssh_agent" && (
               <div className="auth-hint-card">
                 <p>
-                  ℹ️ <strong>使用前置说明：</strong>此模式直接复用系统已加载的 SSH 私钥，无需在本软件保存密码。
+                  ℹ️ <strong>使用说明：</strong>此模式直接复用系统加载的 SSH 私钥，无需在本软件输入密码。
                 </p>
                 <p>
-                  需确保本机已运行 <code>ssh-agent</code> 服务并执行过 <code>ssh-add</code>；若未配置请选择<strong>【密码】</strong>或<strong>【私钥】</strong>。
+                  需确保本机已运行 <code>ssh-agent</code> 服务并执行过 <code>ssh-add</code>。
                 </p>
               </div>
             )}
@@ -537,14 +807,14 @@ export default function App() {
                   set={(value) => setHostForm({ ...hostForm, privateKey: value })}
                 />
                 <small className="field-hint">
-                  例如：C:\Users\Administrator\.ssh\id_rsa 或 /Users/name/.ssh/id_ed25519
+                  例如：C:\Users\Admin\.ssh\id_rsa 或 /Users/name/.ssh/id_ed25519
                 </small>
               </div>
             )}
             {hostForm.authType === "password" && (
               <div>
                 <Field
-                  label="密码"
+                  label="登录密码"
                   type="password"
                   value={hostForm.password}
                   set={(value) => setHostForm({ ...hostForm, password: value })}
@@ -552,6 +822,91 @@ export default function App() {
                 <small className="field-hint">🔒 密码将通过系统本地安全凭据（Windows DPAPI）加密存储</small>
               </div>
             )}
+
+            {/* 高级设置折叠面板 */}
+            <div className="accordion-section">
+              <button
+                type="button"
+                className="accordion-toggle"
+                onClick={() => setShowAdvancedHost(!showAdvancedHost)}
+              >
+                <span>{showAdvancedHost ? "▼" : "▶"} 高级设置（跳板机、证书、网络优化与自定义参数）</span>
+              </button>
+
+              {showAdvancedHost && (
+                <div className="accordion-content">
+                  <label>
+                    跳板机 / 堡垒机 (ProxyJump)
+                    <select
+                      value={hostForm.jumpHostId}
+                      onChange={(e) =>
+                        setHostForm({ ...hostForm, jumpHostId: e.target.value })
+                      }
+                    >
+                      <option value="">无（直连此服务器）</option>
+                      {hosts
+                        .filter((h) => !hostEditing || h.name !== hostEditing)
+                        .map((h) => (
+                          <option key={h.id} value={h.id}>
+                            {h.name} ({h.username}@{h.hostname}:{h.port})
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <small className="field-hint">自动追加 <code>-J jump_host</code> 通过堡垒机建立多跳安全隧道</small>
+
+                  <Field
+                    label="前置代理命令 (ProxyCommand，可选)"
+                    value={hostForm.proxyCommand}
+                    set={(value) => setHostForm({ ...hostForm, proxyCommand: value })}
+                  />
+                  <small className="field-hint">例如通过内网 HTTP/SOCKS 代理穿透连接：<code>connect-proxy -S 127.0.0.1:1080 %h %p</code></small>
+
+                  <Field
+                    label="SSH 证书文件路径 (CertificateFile，可选)"
+                    value={hostForm.certificateFile}
+                    set={(value) => setHostForm({ ...hostForm, certificateFile: value })}
+                  />
+
+                  <div className="pair-checks">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={hostForm.identitiesOnly}
+                        onChange={(e) =>
+                          setHostForm({ ...hostForm, identitiesOnly: e.target.checked })
+                        }
+                      />
+                      严格只用指定私钥 (IdentitiesOnly，防 Agent 密钥过多被拒)
+                    </label>
+
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={hostForm.compression}
+                        onChange={(e) =>
+                          setHostForm({ ...hostForm, compression: e.target.checked })
+                        }
+                      />
+                      启用数据流压缩 (-C / Compression，优化弱网高延迟)
+                    </label>
+                  </div>
+
+                  <label>
+                    自定义 OpenSSH 参数 (-o 键值对，每行一个)
+                    <textarea
+                      rows={3}
+                      value={hostForm.customOptionsText}
+                      placeholder="PubkeyAcceptedKeyTypes=+ssh-rsa&#10;IPQoS=throughput"
+                      onChange={(e) =>
+                        setHostForm({ ...hostForm, customOptionsText: e.target.value })
+                      }
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+
             {formError && (
               <p className="form-error" role="alert">
                 {formError}
@@ -571,25 +926,57 @@ export default function App() {
                 className="primary submit"
                 style={{ marginLeft: hostEditing ? "0" : "auto" }}
               >
-                保存
+                保存服务器
               </button>
             </div>
           </form>
         </Modal>
       )}
+
+      {/* 隧道设置弹窗 */}
       {panel === "tunnel" && (
         <Modal
-          title={tunnelEditing ? "编辑 Tunnel" : "新建 Tunnel"}
+          title={tunnelEditing ? "编辑 Tunnel / 代理" : "新建 Tunnel / 代理"}
           close={closePanel}
         >
           <form onSubmit={saveTunnel}>
+            {/* 转发模式分段选择器 */}
+            <label>转发模式</label>
+            <div className="mode-selector">
+              <button
+                type="button"
+                className={`mode-btn ${tunnelForm.kind === "local" ? "active" : ""}`}
+                onClick={() => setTunnelForm({ ...tunnelForm, kind: "local" })}
+              >
+                <strong>🔄 本地端口转发 (-L)</strong>
+                <small>将远端内网端口映射到本机</small>
+              </button>
+              <button
+                type="button"
+                className={`mode-btn ${tunnelForm.kind === "dynamic" ? "active" : ""}`}
+                onClick={() => setTunnelForm({ ...tunnelForm, kind: "dynamic" })}
+              >
+                <strong>🌐 SOCKS5 代理 (-D)</strong>
+                <small>开放全功能动态代理网关</small>
+              </button>
+              <button
+                type="button"
+                className={`mode-btn ${tunnelForm.kind === "remote" ? "active" : ""}`}
+                onClick={() => setTunnelForm({ ...tunnelForm, kind: "remote" })}
+              >
+                <strong>📡 远程反向转发 (-R)</strong>
+                <small>内网穿透：将本机服务暴露到公网</small>
+              </button>
+            </div>
+
             <Field
-              label="名称"
+              label="名称 (用于标记区分)"
               value={tunnelForm.name}
               set={(value) => setTunnelForm({ ...tunnelForm, name: value })}
             />
+
             <label>
-              服务器
+              连接目标服务器
               <select
                 value={tunnelForm.hostName}
                 required
@@ -602,28 +989,36 @@ export default function App() {
                 </option>
                 {hosts.map((host) => (
                   <option key={host.id} value={host.name}>
-                    {host.name}
+                    {host.name} ({host.username}@{host.hostname})
                   </option>
                 ))}
               </select>
             </label>
+
+            {/* 本地端配置 */}
             <div className="pair">
               <label>
-                本地地址
+                本地监听地址
                 <select
                   value={tunnelForm.localHost}
                   onChange={(event) =>
                     setTunnelForm({ ...tunnelForm, localHost: event.target.value })
                   }
                 >
-                  <option value="127.0.0.1">127.0.0.1 (仅本机)</option>
-                  <option value="0.0.0.0">0.0.0.0 (允许局域网访问)</option>
+                  <option value="127.0.0.1">127.0.0.1 (仅本机回环访问)</option>
+                  <option value="0.0.0.0">0.0.0.0 (允许局域网设备共享)</option>
                   <option value="localhost">localhost</option>
                 </select>
               </label>
               <div className="field-with-button">
                 <Field
-                  label="本地端口"
+                  label={
+                    tunnelForm.kind === "dynamic"
+                      ? "本地 SOCKS5 监听端口"
+                      : tunnelForm.kind === "remote"
+                      ? "本地服务端口"
+                      : "本地监听端口"
+                  }
                   type="number"
                   value={tunnelForm.localPort}
                   set={(value) =>
@@ -633,7 +1028,7 @@ export default function App() {
                 <button
                   type="button"
                   className="inline-random-btn"
-                  title="随机分配一个未被占用的空闲端口"
+                  title="随机分配一个空闲端口"
                   onClick={async () => {
                     const port = await fetchAvailablePort(tunnelForm.localHost);
                     setTunnelForm((prev) => ({ ...prev, localPort: port }));
@@ -643,36 +1038,100 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <div className="pair">
-              <Field
-                label="远端地址"
-                value={tunnelForm.remoteHost}
-                set={(value) =>
-                  setTunnelForm({ ...tunnelForm, remoteHost: value })
-                }
-              />
-              <Field
-                label="远端端口"
-                type="number"
-                value={tunnelForm.remotePort}
-                set={(value) =>
-                  setTunnelForm({ ...tunnelForm, remotePort: Number(value) })
-                }
-              />
+
+            {/* 远端配置（Dynamic SOCKS5 模式下隐藏） */}
+            {tunnelForm.kind === "dynamic" ? (
+              <div className="auth-hint-card">
+                <p>
+                  💡 <strong>SOCKS5 动态代理使用提示：</strong>
+                </p>
+                <p>
+                  启动后，可在浏览器（如 SwitchyOmega）或终端配置 SOCKS5 代理：
+                  <br />
+                  <code>socks5://{tunnelForm.localHost}:{tunnelForm.localPort}</code>
+                  ，即可自动通过远端服务器畅通访问远程网络的所有服务与网页。
+                </p>
+              </div>
+            ) : (
+              <div className="pair">
+                <Field
+                  label={tunnelForm.kind === "remote" ? "远程绑定地址 (通常 0.0.0.0 或 127.0.0.1)" : "远端目标主机"}
+                  value={tunnelForm.remoteHost}
+                  set={(value) =>
+                    setTunnelForm({ ...tunnelForm, remoteHost: value })
+                  }
+                />
+                <Field
+                  label={tunnelForm.kind === "remote" ? "远程公网端口 (外部访问此端口)" : "远端目标端口"}
+                  type="number"
+                  value={tunnelForm.remotePort}
+                  set={(value) =>
+                    setTunnelForm({ ...tunnelForm, remotePort: Number(value) })
+                  }
+                />
+              </div>
+            )}
+
+            {tunnelForm.kind === "local" && (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={tunnelForm.autoOpenBrowser}
+                  onChange={(event) =>
+                    setTunnelForm({
+                      ...tunnelForm,
+                      autoOpenBrowser: event.target.checked,
+                    })
+                  }
+                />
+                启动成功后自动打开系统默认浏览器
+              </label>
+            )}
+
+            {/* 隧道高级设置 */}
+            <div className="accordion-section">
+              <button
+                type="button"
+                className="accordion-toggle"
+                onClick={() => setShowAdvancedTunnel(!showAdvancedTunnel)}
+              >
+                <span>{showAdvancedTunnel ? "▼" : "▶"} 隧道高级参数（局域网网关共享、自定义 -o）</span>
+              </button>
+              {showAdvancedTunnel && (
+                <div className="accordion-content">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={tunnelForm.gatewayPorts}
+                      onChange={(e) =>
+                        setTunnelForm({
+                          ...tunnelForm,
+                          gatewayPorts: e.target.checked,
+                          localHost: e.target.checked ? "0.0.0.0" : tunnelForm.localHost,
+                        })
+                      }
+                    />
+                    开启网关端口转发 (-g / GatewayPorts，允许局域网同伴机器连接)
+                  </label>
+
+                  <label>
+                    自定义 OpenSSH 选项 (-o 参数，每行一条)
+                    <textarea
+                      rows={2}
+                      value={tunnelForm.customOptionsText}
+                      placeholder="ExitOnForwardFailure=yes"
+                      onChange={(e) =>
+                        setTunnelForm({
+                          ...tunnelForm,
+                          customOptionsText: e.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              )}
             </div>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={tunnelForm.autoOpenBrowser}
-                onChange={(event) =>
-                  setTunnelForm({
-                    ...tunnelForm,
-                    autoOpenBrowser: event.target.checked,
-                  })
-                }
-              />
-              启动成功后自动打开浏览器
-            </label>
+
             {formError && (
               <p className="form-error" role="alert">
                 {formError}
@@ -692,17 +1151,126 @@ export default function App() {
                 className="primary submit"
                 style={{ marginLeft: tunnelEditing ? "0" : "auto" }}
               >
-                保存
+                保存 Tunnel
               </button>
             </div>
           </form>
         </Modal>
       )}
+
+      {/* 全局设置弹窗 */}
+      {panel === "settings" && (
+        <Modal title="⚙️ 全局网络与连接保活设置" close={closePanel}>
+          <form onSubmit={saveGlobalSettings}>
+            <div className="pair">
+              <Field
+                label="心跳探针周期 (ServerAliveInterval，秒)"
+                type="number"
+                value={settingsForm.serverAliveIntervalSeconds}
+                set={(value) =>
+                  setSettingsForm({
+                    ...settingsForm,
+                    serverAliveIntervalSeconds: Number(value),
+                  })
+                }
+              />
+              <Field
+                label="探针最大未响应次数 (ServerAliveCountMax)"
+                type="number"
+                value={settingsForm.serverAliveCountMax}
+                set={(value) =>
+                  setSettingsForm({
+                    ...settingsForm,
+                    serverAliveCountMax: Number(value),
+                  })
+                }
+              />
+            </div>
+            <small className="field-hint" style={{ marginBottom: "12px" }}>
+              💡 每隔 N 秒发送探针保持连接活跃，连续未响应则判定断开并触发自动重连，彻底根治 NAT/防火墙静默丢包假死问题。
+            </small>
+
+            <div className="pair">
+              <Field
+                label="连接超时时间 (ConnectTimeout，秒)"
+                type="number"
+                value={settingsForm.connectTimeoutSeconds}
+                set={(value) =>
+                  setSettingsForm({
+                    ...settingsForm,
+                    connectTimeoutSeconds: Number(value),
+                  })
+                }
+              />
+            </div>
+
+            <div className="pair-checks" style={{ marginTop: "8px" }}>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={settingsForm.tcpKeepAlive}
+                  onChange={(e) =>
+                    setSettingsForm({
+                      ...settingsForm,
+                      tcpKeepAlive: e.target.checked,
+                    })
+                  }
+                />
+                启用系统 TCP 层保活 (TCPKeepAlive)
+              </label>
+
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={settingsForm.strictHostKeyChecking}
+                  onChange={(e) =>
+                    setSettingsForm({
+                      ...settingsForm,
+                      strictHostKeyChecking: e.target.checked,
+                    })
+                  }
+                />
+                严格主机密钥检查 (StrictHostKeyChecking=accept-new)
+              </label>
+
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={settingsForm.compression}
+                  onChange={(e) =>
+                    setSettingsForm({
+                      ...settingsForm,
+                      compression: e.target.checked,
+                    })
+                  }
+                />
+                全局开启数据流压缩 (-C / Compression)
+              </label>
+            </div>
+
+            {formError && (
+              <p className="form-error" role="alert">
+                {formError}
+              </p>
+            )}
+
+            <div className="form-actions">
+              <button className="primary submit" style={{ marginLeft: "auto" }}>
+                保存全局设置
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* 关于弹窗 */}
       {aboutOpen && (
         <Modal title="关于 SSH Forward" close={() => setAboutOpen(false)}>
           <div className="about">
-            <p>SSH Forward v{appVersion}</p>
-            <p>本地 SSH 端口转发工具。</p>
+            <p style={{ fontSize: "16px", fontWeight: "bold" }}>
+              SSH Forward v{appVersion}
+            </p>
+            <p>基于 OpenSSH 的本地端口转发、动态 SOCKS5 代理与内网穿透工具。</p>
             <a href={repositoryUrl} target="_blank" rel="noreferrer">
               {repositoryUrl}
             </a>
@@ -778,6 +1346,7 @@ function Field({
     </label>
   );
 }
+
 function Modal({
   title,
   close,

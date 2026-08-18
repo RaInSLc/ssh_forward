@@ -60,6 +60,12 @@ pub fn add_host_with_auth(
         port,
         username,
         auth,
+        jump_host_id: None,
+        proxy_command: None,
+        identities_only: None,
+        certificate_file: None,
+        compression: None,
+        custom_options: Vec::new(),
         enabled: true,
     };
     config.hosts.push(host.clone());
@@ -114,7 +120,32 @@ pub fn add_tunnel(
     name: String,
     host_name: &str,
     local: Endpoint,
-    remote: Endpoint,
+    remote: Option<Endpoint>,
+    auto_open_browser: bool,
+) -> Result<Tunnel, CoreError> {
+    add_tunnel_full(
+        path,
+        name,
+        host_name,
+        TunnelType::Local,
+        local,
+        remote,
+        false,
+        Vec::new(),
+        auto_open_browser,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn add_tunnel_full(
+    path: &Path,
+    name: String,
+    host_name: &str,
+    kind: TunnelType,
+    local: Endpoint,
+    remote: Option<Endpoint>,
+    gateway_ports: bool,
+    custom_options: Vec<String>,
     auto_open_browser: bool,
 ) -> Result<Tunnel, CoreError> {
     let mut config = load(path)?;
@@ -134,9 +165,11 @@ pub fn add_tunnel(
         id: Uuid::new_v4().to_string(),
         name,
         host_id,
-        kind: TunnelType::Local,
+        kind,
         local,
         remote,
+        gateway_ports,
+        custom_options,
         auto_start: false,
         auto_reconnect: true,
         auto_open_browser,
@@ -226,10 +259,15 @@ pub fn start_tunnel_with_password(
             host.name
         )));
     }
+    let jump_host = host
+        .jump_host_id
+        .as_deref()
+        .and_then(|jump_id| config.hosts.iter().find(|h| h.id == jump_id));
     Ok(OpenSshForward::start(
         &config.settings,
         host,
         tunnel,
+        jump_host,
         password,
     )?)
 }

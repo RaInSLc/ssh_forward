@@ -19,13 +19,21 @@ pub enum SshError {
 }
 
 pub fn check_local_port(tunnel: &Tunnel) -> Result<(), SshError> {
+    if tunnel.kind == ssh_forward_config::TunnelType::Remote {
+        return Ok(());
+    }
     let address = format!("{}:{}", tunnel.local.host, tunnel.local.port);
     TcpListener::bind(&address)
         .map(drop)
         .map_err(|source| SshError::LocalPortUnavailable { address, source })
 }
 
-pub fn openssh_arguments(settings: &Settings, host: &Host, tunnel: &Tunnel) -> Vec<String> {
+pub fn openssh_arguments(
+    settings: &Settings,
+    host: &Host,
+    tunnel: &Tunnel,
+    jump_host: Option<&Host>,
+) -> Vec<String> {
     let mut arguments = vec![
         "-N".into(),
         "-o".into(),
@@ -41,14 +49,100 @@ pub fn openssh_arguments(settings: &Settings, host: &Host, tunnel: &Tunnel) -> V
                 "no"
             }
         ),
-        "-p".into(),
-        host.port.to_string(),
-        "-L".into(),
+        "-o".into(),
         format!(
-            "{}:{}:{}:{}",
-            tunnel.local.host, tunnel.local.port, tunnel.remote.host, tunnel.remote.port
+            "ServerAliveInterval={}",
+            settings.server_alive_interval_seconds
+        ),
+        "-o".into(),
+        format!("ServerAliveCountMax={}", settings.server_alive_count_max),
+        "-o".into(),
+        format!(
+            "TCPKeepAlive={}",
+            if settings.tcp_keep_alive { "yes" } else { "no" }
         ),
     ];
+
+    if host.compression.unwrap_or(settings.compression) {
+        arguments.push("-C".into());
+    }
+
+    if tunnel.gateway_ports {
+        arguments.push("-g".into());
+    }
+
+    if host.identities_only.unwrap_or(false)
+        || (host.auth.kind == AuthType::PrivateKey && host.identities_only != Some(false))
+    {
+        arguments.extend(["-o".into(), "IdentitiesOnly=yes".into()]);
+    }
+
+    if let Some(cert) = &host.certificate_file
+        && !cert.trim().is_empty()
+    {
+        arguments.extend(["-o".into(), format!("CertificateFile={cert}")]);
+    }
+
+    if let Some(proxy_command) = &host.proxy_command
+        && !proxy_command.trim().is_empty()
+    {
+        arguments.extend(["-o".into(), format!("ProxyCommand={proxy_command}")]);
+    }
+
+    if let Some(jump) = jump_host {
+        arguments.extend([
+            "-J".into(),
+            format!("{}@{}:{}", jump.username, jump.hostname, jump.port),
+        ]);
+    }
+
+    // 自定义 -o 选项（主机级与隧道级）
+    for opt in &host.custom_options {
+        let trimmed = opt.trim();
+        if !trimmed.is_empty() {
+            arguments.extend(["-o".into(), trimmed.to_string()]);
+        }
+    }
+    for opt in &tunnel.custom_options {
+        let trimmed = opt.trim();
+        if !trimmed.is_empty() {
+            arguments.extend(["-o".into(), trimmed.to_string()]);
+        }
+    }
+
+    arguments.extend(["-p".into(), host.port.to_string()]);
+
+    match tunnel.kind {
+        ssh_forward_config::TunnelType::Local => {
+            if let Some(remote) = &tunnel.remote {
+                arguments.extend([
+                    "-L".into(),
+                    format!(
+                        "{}:{}:{}:{}",
+                        tunnel.local.host, tunnel.local.port, remote.host, remote.port
+                    ),
+                ]);
+            }
+        }
+        ssh_forward_config::TunnelType::Dynamic => {
+            arguments.extend([
+                "-D".into(),
+                format!("{}:{}", tunnel.local.host, tunnel.local.port),
+            ]);
+        }
+        ssh_forward_config::TunnelType::Remote => {
+            if let Some(remote) = &tunnel.remote {
+                arguments.extend([
+                    "-R".into(),
+                    format!(
+                        "{}:{}:{}:{}",
+                        remote.host, remote.port, tunnel.local.host, tunnel.local.port
+                    ),
+                ]);
+            }
+        }
+    }
+
     if host.auth.kind == AuthType::PrivateKey
         && let Some(private_key) = &host.auth.private_key
     {
@@ -68,13 +162,14 @@ impl OpenSshForward {
         settings: &Settings,
         host: &Host,
         tunnel: &Tunnel,
+        jump_host: Option<&Host>,
         password: Option<&str>,
     ) -> Result<Self, SshError> {
         check_local_port(tunnel)?;
         let askpass = password.map(|_| create_askpass_script()).transpose()?;
         let mut command = Command::new("ssh");
         command
-            .args(openssh_arguments(settings, host, tunnel))
+            .args(openssh_arguments(settings, host, tunnel, jump_host))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -154,6 +249,12 @@ mod tests {
             port: 2222,
             username: "alice".into(),
             auth: Auth::default(),
+            jump_host_id: None,
+            proxy_command: None,
+            identities_only: None,
+            certificate_file: None,
+            compression: None,
+            custom_options: vec!["PubkeyAcceptedKeyTypes=+ssh-rsa".into()],
             enabled: true,
         };
         let tunnel = Tunnel {
@@ -162,18 +263,83 @@ mod tests {
             host_id: host.id.clone(),
             kind: TunnelType::Local,
             local: Endpoint::localhost(18080),
-            remote: Endpoint::localhost(8080),
+            remote: Some(Endpoint::localhost(8080)),
+            gateway_ports: true,
+            custom_options: vec![],
             auto_start: false,
             auto_reconnect: true,
             auto_open_browser: false,
             enabled: true,
         };
-        let args = openssh_arguments(&settings, &host, &tunnel);
+        let args = openssh_arguments(&settings, &host, &tunnel, None);
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["-L", "127.0.0.1:18080:127.0.0.1:8080"])
         );
         assert!(args.contains(&"StrictHostKeyChecking=accept-new".into()));
+        assert!(args.contains(&"ServerAliveInterval=15".into()));
+        assert!(args.contains(&"ServerAliveCountMax=3".into()));
+        assert!(args.contains(&"-g".into()));
+        assert!(args.contains(&"PubkeyAcceptedKeyTypes=+ssh-rsa".into()));
+    }
+
+    #[test]
+    fn builds_dynamic_and_jump_command() {
+        let settings = Settings::default();
+        let jump = Host {
+            id: "jump-1".into(),
+            name: "bastion".into(),
+            hostname: "bastion.test".into(),
+            port: 22,
+            username: "bastion_user".into(),
+            auth: Auth::default(),
+            jump_host_id: None,
+            proxy_command: None,
+            identities_only: None,
+            certificate_file: None,
+            compression: None,
+            custom_options: vec![],
+            enabled: true,
+        };
+        let host = Host {
+            id: "host-2".into(),
+            name: "internal".into(),
+            hostname: "internal.test".into(),
+            port: 22,
+            username: "bob".into(),
+            auth: Auth::default(),
+            jump_host_id: Some("jump-1".into()),
+            proxy_command: None,
+            identities_only: None,
+            certificate_file: None,
+            compression: Some(true),
+            custom_options: vec![],
+            enabled: true,
+        };
+        let tunnel = Tunnel {
+            id: "tunnel-dyn".into(),
+            name: "socks5".into(),
+            host_id: host.id.clone(),
+            kind: TunnelType::Dynamic,
+            local: Endpoint::localhost(10808),
+            remote: None,
+            gateway_ports: false,
+            custom_options: vec![],
+            auto_start: false,
+            auto_reconnect: true,
+            auto_open_browser: false,
+            enabled: true,
+        };
+        let args = openssh_arguments(&settings, &host, &tunnel, Some(&jump));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-J", "bastion_user@bastion.test:22"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-D", "127.0.0.1:10808"])
+        );
+        assert!(args.contains(&"-C".into()));
     }
 }
 
