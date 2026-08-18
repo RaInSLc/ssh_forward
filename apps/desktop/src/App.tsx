@@ -6,6 +6,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 type AuthType = "ssh_agent" | "private_key" | "password";
 type TunnelType = "local" | "dynamic" | "remote";
 type Theme = "light" | "dark";
+type ViewMode = "grid" | "table";
 
 type Host = {
   id: string;
@@ -144,6 +145,12 @@ const newSettings = (): SettingsForm => ({
 const storedTheme = (): Theme =>
   localStorage.getItem("ssh-forward-theme") === "dark" ? "dark" : "light";
 
+const storedAdvancedMode = (): boolean =>
+  localStorage.getItem("ssh-forward-advanced-mode") === "true";
+
+const storedViewMode = (): ViewMode =>
+  localStorage.getItem("ssh-forward-view-mode") === "table" ? "table" : "grid";
+
 const fetchAvailablePort = async (host?: string): Promise<number> => {
   try {
     return await invoke<number>("get_available_port", {
@@ -168,15 +175,29 @@ export default function App() {
   const [formError, setFormError] = useState("");
   const [aboutOpen, setAboutOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(storedTheme);
+  const [advancedMode, setAdvancedMode] = useState<boolean>(storedAdvancedMode);
+  const [viewMode, setViewMode] = useState<ViewMode>(storedViewMode);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const appVersion = snapshot?.version ?? "0.1.14";
+  const appVersion = snapshot?.version ?? "0.1.15";
 
   const [updateAvailable, setUpdateAvailable] = useState<Update | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [updateDownloaded, setUpdateDownloaded] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("");
+
+  const toggleAdvancedMode = () => {
+    const next = !advancedMode;
+    setAdvancedMode(next);
+    localStorage.setItem("ssh-forward-advanced-mode", String(next));
+  };
+
+  const toggleViewMode = () => {
+    const next: ViewMode = viewMode === "grid" ? "table" : "grid";
+    setViewMode(next);
+    localStorage.setItem("ssh-forward-view-mode", next);
+  };
 
   const checkForUpdates = async (manual = true) => {
     try {
@@ -347,12 +368,12 @@ export default function App() {
       authType: hostForm.authType,
       password: hostForm.password || null,
       privateKey: hostForm.privateKey || null,
-      jumpHostId: hostForm.jumpHostId || null,
-      proxyCommand: hostForm.proxyCommand || null,
-      identitiesOnly: hostForm.identitiesOnly,
-      certificateFile: hostForm.certificateFile || null,
-      compression: hostForm.compression,
-      customOptions: customOptions.length ? customOptions : null,
+      jumpHostId: advancedMode ? hostForm.jumpHostId || null : null,
+      proxyCommand: advancedMode ? hostForm.proxyCommand || null : null,
+      identitiesOnly: advancedMode ? hostForm.identitiesOnly : true,
+      certificateFile: advancedMode ? hostForm.certificateFile || null : null,
+      compression: advancedMode ? hostForm.compression : false,
+      customOptions: advancedMode && customOptions.length ? customOptions : null,
     };
     const error = await action(
       hostEditing ? "edit_host" : "create_host",
@@ -375,17 +396,18 @@ export default function App() {
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const isDynamic = tunnelForm.kind === "dynamic";
+    const kind = advancedMode ? tunnelForm.kind : "local";
+    const isDynamic = kind === "dynamic";
     const input = {
       name: tunnelForm.name,
       hostName: tunnelForm.hostName,
-      kind: tunnelForm.kind,
+      kind,
       localHost: tunnelForm.localHost,
       localPort: Number(tunnelForm.localPort),
       remoteHost: isDynamic ? null : tunnelForm.remoteHost,
       remotePort: isDynamic ? null : Number(tunnelForm.remotePort),
-      gatewayPorts: tunnelForm.gatewayPorts,
-      customOptions: customOptions.length ? customOptions : null,
+      gatewayPorts: advancedMode ? tunnelForm.gatewayPorts : false,
+      customOptions: advancedMode && customOptions.length ? customOptions : null,
       autoOpenBrowser: isDynamic ? false : tunnelForm.autoOpenBrowser,
     };
     const error = await action(
@@ -510,9 +532,10 @@ export default function App() {
           <span>SF</span>
           <div>
             <strong>SSH Forward</strong>
-            <small>专业 SSH 转发与代理客户端</small>
+            <small>{advancedMode ? "专业进阶版 (已开启高级设置)" : "本地端口转发客户端"}</small>
           </div>
         </div>
+
         <div className="sidebar-section-header">
           <p className="eyebrow">HOSTS / 服务器列表</p>
           <button className="icon-btn" title="添加服务器" onClick={() => openHost()}>
@@ -532,7 +555,7 @@ export default function App() {
                 <small>
                   {host.username}@{host.hostname}:{host.port}
                 </small>
-                {host.jump_host_id && (
+                {advancedMode && host.jump_host_id && (
                   <span className="mini-badge">🦘 跳板机</span>
                 )}
               </span>
@@ -546,9 +569,11 @@ export default function App() {
           + 添加服务器
         </button>
 
-        <button className="settings-link-btn" onClick={openSettings}>
-          ⚙️ 全局网络与保活设置
-        </button>
+        {advancedMode && (
+          <button className="settings-link-btn" onClick={openSettings}>
+            ⚙️ 全局网络与保活设置
+          </button>
+        )}
 
         <footer>
           <span>{notice}</span>
@@ -564,10 +589,30 @@ export default function App() {
       <section className="workspace">
         <header>
           <div>
-            <p className="eyebrow">FORWARDS & PROXY / 转发与代理</p>
+            <p className="eyebrow">
+              {advancedMode ? "FORWARDS & PROXY / 进阶转发与代理" : "LOCAL FORWARDS / 本地端口转发"}
+            </p>
             <h1>转发控制台</h1>
           </div>
           <div className="header-actions">
+            {/* 高级模式切换开关按钮 */}
+            <button
+              className={`mode-toggle-btn ${advancedMode ? "active" : ""}`}
+              onClick={toggleAdvancedMode}
+              title={advancedMode ? "点击切回 0.1.13 基础精简模式" : "点击开启 0.1.14 高级设置 (SOCKS5/反向穿透/跳板机/保活)"}
+            >
+              {advancedMode ? "⚡ 高级模式：已开启" : "⚙️ 开启高级设置"}
+            </button>
+
+            {/* 视图切换按钮 */}
+            <button
+              className="view-toggle-btn"
+              onClick={toggleViewMode}
+              title="切换视图展示模式 (卡片 / 表格)"
+            >
+              {viewMode === "grid" ? "📋 切换表格" : "🗂️ 切换卡片"}
+            </button>
+
             <button
               className="theme-toggle"
               onClick={() => setTheme(theme === "light" ? "dark" : "light")}
@@ -579,162 +624,308 @@ export default function App() {
               disabled={!hosts.length}
               onClick={() => openTunnel()}
             >
-              + 新建 Tunnel / 代理
+              {advancedMode ? "+ 新建 Tunnel / 代理" : "+ 新建 Tunnel"}
             </button>
           </div>
         </header>
 
-        <div className="tunnels">
-          {tunnels.map((tunnel) => {
-            const status = statuses[tunnel.name] ?? {
-              state: "stopped" as const,
-            };
-            const running = status.state === "running";
-            const host = hosts.find((h) => h.id === tunnel.host_id);
-            const isDynamic = tunnel.type === "dynamic";
-            const isRemote = tunnel.type === "remote";
-            const socksAddress = `socks5://${tunnel.local.host}:${tunnel.local.port}`;
-            const localAddress = `http://${tunnel.local.host}:${tunnel.local.port}`;
+        {/* 隧道列表容器：支持卡片与表格视图自适应 */}
+        <div className={`tunnels-container view-${viewMode}`}>
+          {/* 表格视图 Table View */}
+          <div className="table-wrapper">
+            <table className="tunnels-table">
+              <thead>
+                <tr>
+                  <th>名称 / 模式</th>
+                  <th>本地端口 / 地址</th>
+                  <th>远端目标 / 路径</th>
+                  <th>状态</th>
+                  <th style={{ textAlign: "right" }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tunnels.map((tunnel) => {
+                  const status = statuses[tunnel.name] ?? { state: "stopped" as const };
+                  const running = status.state === "running";
+                  const host = hosts.find((h) => h.id === tunnel.host_id);
+                  const isDynamic = tunnel.type === "dynamic";
+                  const isRemote = tunnel.type === "remote";
+                  const socksAddress = `socks5://${tunnel.local.host}:${tunnel.local.port}`;
+                  const localAddress = `http://${tunnel.local.host}:${tunnel.local.port}`;
 
-            return (
-              <article key={tunnel.id} className={`tunnel-card ${tunnel.type}`}>
-                <div className="tunnel-head">
-                  <div>
-                    <div className="tunnel-title-row">
-                      <h2>{tunnel.name}</h2>
-                      <span className={`mode-badge ${tunnel.type}`}>
-                        {isDynamic
-                          ? "SOCKS5 动态代理"
-                          : isRemote
-                          ? "Remote 反向穿透"
-                          : "Local 本地转发"}
-                      </span>
-                      {tunnel.gateway_ports && (
-                        <span className="mode-badge gateway">局域网共享</span>
-                      )}
-                    </div>
-
-                    <div className="tunnel-route">
-                      {isDynamic ? (
-                        <div className="route-desc">
-                          <span>代理端口：</span>
-                          <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
-                          <span className="route-arrow">→</span>
-                          <span className="route-dest">
-                            远程服务器 <code>{host?.hostname ?? "未知"}</code> 完整网络
+                  return (
+                    <tr key={tunnel.id}>
+                      <td>
+                        <div className="table-title-cell">
+                          <strong>{tunnel.name}</strong>
+                          {advancedMode && (
+                            <span className={`mode-badge ${tunnel.type}`}>
+                              {isDynamic
+                                ? "SOCKS5 代理"
+                                : isRemote
+                                ? "Remote 穿透"
+                                : "Local 转发"}
+                            </span>
+                          )}
+                          {advancedMode && tunnel.gateway_ports && (
+                            <span className="mode-badge gateway">共享</span>
+                          )}
+                        </div>
+                        {status.message && (
+                          <div className="table-error-hint">{status.message}</div>
+                        )}
+                      </td>
+                      <td>
+                        <code className="port-badge">
+                          {tunnel.local.host}:{tunnel.local.port}
+                        </code>
+                      </td>
+                      <td>
+                        {isDynamic ? (
+                          <span className="table-dest-desc">
+                            🌐 代理访问 <code>{host?.hostname ?? "远端服务器"}</code> 私有网络
                           </span>
+                        ) : isRemote ? (
+                          <span className="table-dest-desc">
+                            📡 公网 <code>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</code> → 本地
+                          </span>
+                        ) : (
+                          <span className="table-dest-desc">
+                            → <code>{tunnel.remote?.host}:{tunnel.remote?.port}</code> ({host?.name ?? ""})
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`status ${status.state}`}>
+                          {running ? "运行中" : status.state === "error" ? "异常" : "已停止"}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="table-actions">
+                          {isDynamic ? (
+                            <button
+                              className="btn-sm"
+                              disabled={!running}
+                              onClick={() => copyToClipboard(socksAddress, `tbl-socks-${tunnel.id}`)}
+                            >
+                              {copiedId === `tbl-socks-${tunnel.id}` ? "✓ 已复制" : "复制代理"}
+                            </button>
+                          ) : isRemote ? (
+                            <button
+                              className="btn-sm"
+                              disabled={!running}
+                              onClick={() =>
+                                copyToClipboard(
+                                  `${host?.hostname ?? "服务器IP"}:${tunnel.remote?.port}`,
+                                  `tbl-remote-${tunnel.id}`
+                                )
+                              }
+                            >
+                              {copiedId === `tbl-remote-${tunnel.id}` ? "✓ 已复制" : "复制公网"}
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                className="btn-sm"
+                                disabled={!running}
+                                onClick={() =>
+                                  void action("open_tunnel_in_browser", { name: tunnel.name })
+                                }
+                              >
+                                打开
+                              </button>
+                              <button
+                                className="btn-sm"
+                                disabled={!running}
+                                onClick={() => copyToClipboard(localAddress, `tbl-local-${tunnel.id}`)}
+                              >
+                                {copiedId === `tbl-local-${tunnel.id}` ? "✓ 已复制" : "复制"}
+                              </button>
+                            </>
+                          )}
+                          <button
+                            className={`btn-sm ${running ? "btn-stop" : "btn-start"}`}
+                            onClick={() =>
+                              void action(running ? "stop_tunnel" : "start_tunnel", {
+                                name: tunnel.name,
+                              })
+                            }
+                          >
+                            {running ? "停止" : "启动"}
+                          </button>
+                          <button className="btn-sm" onClick={() => openTunnel(tunnel)}>
+                            编辑
+                          </button>
+                          <button
+                            className="btn-sm danger-link"
+                            onClick={() => void deleteTunnel(tunnel.name)}
+                          >
+                            删除
+                          </button>
                         </div>
-                      ) : isRemote ? (
-                        <div className="route-desc">
-                          <span>远端公网端口：</span>
-                          <strong>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</strong>
-                          <span className="route-arrow">→</span>
-                          <span>本地服务：</span>
-                          <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
-                        </div>
-                      ) : (
-                        <div className="route-desc">
-                          <span>本地：</span>
-                          <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
-                          <span className="route-arrow">→</span>
-                          <span>远端目标：</span>
-                          <strong>{tunnel.remote?.host}:{tunnel.remote?.port}</strong>
-                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* 卡片视图 Card Grid View */}
+          <div className="tunnels-grid">
+            {tunnels.map((tunnel) => {
+              const status = statuses[tunnel.name] ?? {
+                state: "stopped" as const,
+              };
+              const running = status.state === "running";
+              const host = hosts.find((h) => h.id === tunnel.host_id);
+              const isDynamic = tunnel.type === "dynamic";
+              const isRemote = tunnel.type === "remote";
+              const socksAddress = `socks5://${tunnel.local.host}:${tunnel.local.port}`;
+              const localAddress = `http://${tunnel.local.host}:${tunnel.local.port}`;
+
+              return (
+                <article key={tunnel.id} className={`tunnel-card ${tunnel.type}`}>
+                  <div className="tunnel-head">
+                    <div>
+                      <div className="tunnel-title-row">
+                        <h2>{tunnel.name}</h2>
+                        {advancedMode && (
+                          <span className={`mode-badge ${tunnel.type}`}>
+                            {isDynamic
+                              ? "SOCKS5 动态代理"
+                              : isRemote
+                              ? "Remote 反向穿透"
+                              : "Local 本地转发"}
+                          </span>
+                        )}
+                        {advancedMode && tunnel.gateway_ports && (
+                          <span className="mode-badge gateway">局域网共享</span>
+                        )}
+                      </div>
+
+                      <div className="tunnel-route">
+                        {isDynamic ? (
+                          <div className="route-desc">
+                            <span>代理端口：</span>
+                            <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                            <span className="route-arrow">→</span>
+                            <span className="route-dest">
+                              <code>{host?.hostname ?? "远端服务器"}</code> 全网
+                            </span>
+                          </div>
+                        ) : isRemote ? (
+                          <div className="route-desc">
+                            <span>公网：</span>
+                            <strong>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</strong>
+                            <span className="route-arrow">→</span>
+                            <span>本地：</span>
+                            <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                          </div>
+                        ) : (
+                          <div className="route-desc">
+                            <span>本地：</span>
+                            <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                            <span className="route-arrow">→</span>
+                            <span>远端：</span>
+                            <strong>{tunnel.remote?.host}:{tunnel.remote?.port}</strong>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <span className={`status ${status.state}`}>
+                      {running
+                        ? "运行中"
+                        : status.state === "error"
+                        ? "异常"
+                        : "已停止"}
+                    </span>
+                  </div>
+
+                  {status.message && (
+                    <div className="error-box">
+                      <p className="error-text">{status.message}</p>
+                      {host && (
+                        <button
+                          type="button"
+                          className="error-action-btn"
+                          onClick={() => openHost(host)}
+                        >
+                          ⚙️ 去修改服务器“{host.name}”的设置
+                        </button>
                       )}
                     </div>
-                  </div>
+                  )}
 
-                  <span className={`status ${status.state}`}>
-                    {running
-                      ? "运行中"
-                      : status.state === "error"
-                      ? "异常"
-                      : "已停止"}
-                  </span>
-                </div>
-
-                {status.message && (
-                  <div className="error-box">
-                    <p className="error-text">{status.message}</p>
-                    {host && (
+                  <div className="actions">
+                    {isDynamic ? (
                       <button
-                        type="button"
-                        className="error-action-btn"
-                        onClick={() => openHost(host)}
+                        disabled={!running}
+                        onClick={() => copyToClipboard(socksAddress, `socks-${tunnel.id}`)}
                       >
-                        ⚙️ 去修改服务器“{host.name}”的设置
+                        {copiedId === `socks-${tunnel.id}` ? "✓ 已复制" : "复制代理"}
                       </button>
-                    )}
-                  </div>
-                )}
-
-                <div className="actions">
-                  {isDynamic ? (
-                    <button
-                      disabled={!running}
-                      onClick={() => copyToClipboard(socksAddress, `socks-${tunnel.id}`)}
-                    >
-                      {copiedId === `socks-${tunnel.id}` ? "✓ 已复制 SOCKS5 地址" : "📋 复制代理地址"}
-                    </button>
-                  ) : isRemote ? (
-                    <button
-                      disabled={!running}
-                      onClick={() =>
-                        copyToClipboard(
-                          `${host?.hostname ?? "服务器IP"}:${tunnel.remote?.port}`,
-                          `remote-${tunnel.id}`
-                        )
-                      }
-                    >
-                      {copiedId === `remote-${tunnel.id}` ? "✓ 已复制公网地址" : "📋 复制公网访问地址"}
-                    </button>
-                  ) : (
-                    <>
+                    ) : isRemote ? (
                       <button
                         disabled={!running}
                         onClick={() =>
-                          void action("open_tunnel_in_browser", {
-                            name: tunnel.name,
-                          })
+                          copyToClipboard(
+                            `${host?.hostname ?? "服务器IP"}:${tunnel.remote?.port}`,
+                            `remote-${tunnel.id}`
+                          )
                         }
                       >
-                        打开浏览器
+                        {copiedId === `remote-${tunnel.id}` ? "✓ 已复制" : "复制公网"}
                       </button>
-                      <button
-                        disabled={!running}
-                        onClick={() => copyToClipboard(localAddress, `local-${tunnel.id}`)}
-                      >
-                        {copiedId === `local-${tunnel.id}` ? "✓ 已复制" : "复制地址"}
-                      </button>
-                    </>
-                  )}
+                    ) : (
+                      <>
+                        <button
+                          disabled={!running}
+                          onClick={() =>
+                            void action("open_tunnel_in_browser", {
+                              name: tunnel.name,
+                            })
+                          }
+                        >
+                          打开浏览器
+                        </button>
+                        <button
+                          disabled={!running}
+                          onClick={() => copyToClipboard(localAddress, `local-${tunnel.id}`)}
+                        >
+                          {copiedId === `local-${tunnel.id}` ? "✓ 已复制" : "复制地址"}
+                        </button>
+                      </>
+                    )}
 
-                  <button
-                    className={running ? "btn-stop" : "btn-start"}
-                    onClick={() =>
-                      void action(running ? "stop_tunnel" : "start_tunnel", {
-                        name: tunnel.name,
-                      })
-                    }
-                  >
-                    {running ? "停止" : "启动"}
-                  </button>
-                  <button onClick={() => openTunnel(tunnel)}>编辑</button>
-                  <button
-                    className="danger-link"
-                    onClick={() => void deleteTunnel(tunnel.name)}
-                  >
-                    删除
-                  </button>
-                </div>
-              </article>
-            );
-          })}
+                    <button
+                      className={running ? "btn-stop" : "btn-start"}
+                      onClick={() =>
+                        void action(running ? "stop_tunnel" : "start_tunnel", {
+                          name: tunnel.name,
+                        })
+                      }
+                    >
+                      {running ? "停止" : "启动"}
+                    </button>
+                    <button onClick={() => openTunnel(tunnel)}>编辑</button>
+                    <button
+                      className="danger-link"
+                      onClick={() => void deleteTunnel(tunnel.name)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
 
           {!tunnels.length && (
             <div className="zero">
               <h2>还没有创建 Tunnel</h2>
-              <p>点击上方“+ 新建 Tunnel / 代理”，建立本地端口转发、SOCKS5 代理或远程穿透。</p>
+              <p>点击上方“+ 新建 Tunnel”，建立首条本地端口转发。</p>
             </div>
           )}
         </div>
@@ -823,89 +1014,91 @@ export default function App() {
               </div>
             )}
 
-            {/* 高级设置折叠面板 */}
-            <div className="accordion-section">
-              <button
-                type="button"
-                className="accordion-toggle"
-                onClick={() => setShowAdvancedHost(!showAdvancedHost)}
-              >
-                <span>{showAdvancedHost ? "▼" : "▶"} 高级设置（跳板机、证书、网络优化与自定义参数）</span>
-              </button>
+            {/* 高级模式下才显示服务器高级折叠面板 */}
+            {advancedMode && (
+              <div className="accordion-section">
+                <button
+                  type="button"
+                  className="accordion-toggle"
+                  onClick={() => setShowAdvancedHost(!showAdvancedHost)}
+                >
+                  <span>{showAdvancedHost ? "▼" : "▶"} 高级设置（跳板机、证书、网络优化与自定义参数）</span>
+                </button>
 
-              {showAdvancedHost && (
-                <div className="accordion-content">
-                  <label>
-                    跳板机 / 堡垒机 (ProxyJump)
-                    <select
-                      value={hostForm.jumpHostId}
-                      onChange={(e) =>
-                        setHostForm({ ...hostForm, jumpHostId: e.target.value })
-                      }
-                    >
-                      <option value="">无（直连此服务器）</option>
-                      {hosts
-                        .filter((h) => !hostEditing || h.name !== hostEditing)
-                        .map((h) => (
-                          <option key={h.id} value={h.id}>
-                            {h.name} ({h.username}@{h.hostname}:{h.port})
-                          </option>
-                        ))}
-                    </select>
-                  </label>
-                  <small className="field-hint">自动追加 <code>-J jump_host</code> 通过堡垒机建立多跳安全隧道</small>
-
-                  <Field
-                    label="前置代理命令 (ProxyCommand，可选)"
-                    value={hostForm.proxyCommand}
-                    set={(value) => setHostForm({ ...hostForm, proxyCommand: value })}
-                  />
-                  <small className="field-hint">例如通过内网 HTTP/SOCKS 代理穿透连接：<code>connect-proxy -S 127.0.0.1:1080 %h %p</code></small>
-
-                  <Field
-                    label="SSH 证书文件路径 (CertificateFile，可选)"
-                    value={hostForm.certificateFile}
-                    set={(value) => setHostForm({ ...hostForm, certificateFile: value })}
-                  />
-
-                  <div className="pair-checks">
-                    <label className="check">
-                      <input
-                        type="checkbox"
-                        checked={hostForm.identitiesOnly}
+                {showAdvancedHost && (
+                  <div className="accordion-content">
+                    <label>
+                      跳板机 / 堡垒机 (ProxyJump)
+                      <select
+                        value={hostForm.jumpHostId}
                         onChange={(e) =>
-                          setHostForm({ ...hostForm, identitiesOnly: e.target.checked })
+                          setHostForm({ ...hostForm, jumpHostId: e.target.value })
                         }
-                      />
-                      严格只用指定私钥 (IdentitiesOnly，防 Agent 密钥过多被拒)
+                      >
+                        <option value="">无（直连此服务器）</option>
+                        {hosts
+                          .filter((h) => !hostEditing || h.name !== hostEditing)
+                          .map((h) => (
+                            <option key={h.id} value={h.id}>
+                              {h.name} ({h.username}@{h.hostname}:{h.port})
+                            </option>
+                          ))}
+                      </select>
                     </label>
+                    <small className="field-hint">自动追加 <code>-J jump_host</code> 通过堡垒机建立多跳安全隧道</small>
 
-                    <label className="check">
-                      <input
-                        type="checkbox"
-                        checked={hostForm.compression}
+                    <Field
+                      label="前置代理命令 (ProxyCommand，可选)"
+                      value={hostForm.proxyCommand}
+                      set={(value) => setHostForm({ ...hostForm, proxyCommand: value })}
+                    />
+                    <small className="field-hint">例如通过内网 HTTP/SOCKS 代理穿透连接：<code>connect-proxy -S 127.0.0.1:1080 %h %p</code></small>
+
+                    <Field
+                      label="SSH 证书文件路径 (CertificateFile，可选)"
+                      value={hostForm.certificateFile}
+                      set={(value) => setHostForm({ ...hostForm, certificateFile: value })}
+                    />
+
+                    <div className="pair-checks">
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={hostForm.identitiesOnly}
+                          onChange={(e) =>
+                            setHostForm({ ...hostForm, identitiesOnly: e.target.checked })
+                          }
+                        />
+                        严格只用指定私钥 (IdentitiesOnly，防 Agent 密钥过多被拒)
+                      </label>
+
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={hostForm.compression}
+                          onChange={(e) =>
+                            setHostForm({ ...hostForm, compression: e.target.checked })
+                          }
+                        />
+                        启用数据流压缩 (-C / Compression，优化弱网高延迟)
+                      </label>
+                    </div>
+
+                    <label>
+                      自定义 OpenSSH 参数 (-o 键值对，每行一个)
+                      <textarea
+                        rows={3}
+                        value={hostForm.customOptionsText}
+                        placeholder="PubkeyAcceptedKeyTypes=+ssh-rsa&#10;IPQoS=throughput"
                         onChange={(e) =>
-                          setHostForm({ ...hostForm, compression: e.target.checked })
+                          setHostForm({ ...hostForm, customOptionsText: e.target.value })
                         }
                       />
-                      启用数据流压缩 (-C / Compression，优化弱网高延迟)
                     </label>
                   </div>
-
-                  <label>
-                    自定义 OpenSSH 参数 (-o 键值对，每行一个)
-                    <textarea
-                      rows={3}
-                      value={hostForm.customOptionsText}
-                      placeholder="PubkeyAcceptedKeyTypes=+ssh-rsa&#10;IPQoS=throughput"
-                      onChange={(e) =>
-                        setHostForm({ ...hostForm, customOptionsText: e.target.value })
-                      }
-                    />
-                  </label>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
 
             {formError && (
               <p className="form-error" role="alert">
@@ -936,38 +1129,42 @@ export default function App() {
       {/* 隧道设置弹窗 */}
       {panel === "tunnel" && (
         <Modal
-          title={tunnelEditing ? "编辑 Tunnel / 代理" : "新建 Tunnel / 代理"}
+          title={tunnelEditing ? "编辑 Tunnel" : "新建 Tunnel"}
           close={closePanel}
         >
           <form onSubmit={saveTunnel}>
-            {/* 转发模式分段选择器 */}
-            <label>转发模式</label>
-            <div className="mode-selector">
-              <button
-                type="button"
-                className={`mode-btn ${tunnelForm.kind === "local" ? "active" : ""}`}
-                onClick={() => setTunnelForm({ ...tunnelForm, kind: "local" })}
-              >
-                <strong>🔄 本地端口转发 (-L)</strong>
-                <small>将远端内网端口映射到本机</small>
-              </button>
-              <button
-                type="button"
-                className={`mode-btn ${tunnelForm.kind === "dynamic" ? "active" : ""}`}
-                onClick={() => setTunnelForm({ ...tunnelForm, kind: "dynamic" })}
-              >
-                <strong>🌐 SOCKS5 代理 (-D)</strong>
-                <small>开放全功能动态代理网关</small>
-              </button>
-              <button
-                type="button"
-                className={`mode-btn ${tunnelForm.kind === "remote" ? "active" : ""}`}
-                onClick={() => setTunnelForm({ ...tunnelForm, kind: "remote" })}
-              >
-                <strong>📡 远程反向转发 (-R)</strong>
-                <small>内网穿透：将本机服务暴露到公网</small>
-              </button>
-            </div>
+            {/* 高级模式下才显示转发模式分段选择器 */}
+            {advancedMode && (
+              <>
+                <label>转发模式</label>
+                <div className="mode-selector">
+                  <button
+                    type="button"
+                    className={`mode-btn ${tunnelForm.kind === "local" ? "active" : ""}`}
+                    onClick={() => setTunnelForm({ ...tunnelForm, kind: "local" })}
+                  >
+                    <strong>🔄 本地端口转发 (-L)</strong>
+                    <small>将远端内网端口映射到本机</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`mode-btn ${tunnelForm.kind === "dynamic" ? "active" : ""}`}
+                    onClick={() => setTunnelForm({ ...tunnelForm, kind: "dynamic" })}
+                  >
+                    <strong>🌐 SOCKS5 代理 (-D)</strong>
+                    <small>开放全功能动态代理网关</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`mode-btn ${tunnelForm.kind === "remote" ? "active" : ""}`}
+                    onClick={() => setTunnelForm({ ...tunnelForm, kind: "remote" })}
+                  >
+                    <strong>📡 远程反向转发 (-R)</strong>
+                    <small>内网穿透：将本机服务暴露到公网</small>
+                  </button>
+                </div>
+              </>
+            )}
 
             <Field
               label="名称 (用于标记区分)"
@@ -1013,9 +1210,9 @@ export default function App() {
               <div className="field-with-button">
                 <Field
                   label={
-                    tunnelForm.kind === "dynamic"
+                    advancedMode && tunnelForm.kind === "dynamic"
                       ? "本地 SOCKS5 监听端口"
-                      : tunnelForm.kind === "remote"
+                      : advancedMode && tunnelForm.kind === "remote"
                       ? "本地服务端口"
                       : "本地监听端口"
                   }
@@ -1039,8 +1236,8 @@ export default function App() {
               </div>
             </div>
 
-            {/* 远端配置（Dynamic SOCKS5 模式下隐藏） */}
-            {tunnelForm.kind === "dynamic" ? (
+            {/* 远端配置 */}
+            {advancedMode && tunnelForm.kind === "dynamic" ? (
               <div className="auth-hint-card">
                 <p>
                   💡 <strong>SOCKS5 动态代理使用提示：</strong>
@@ -1055,14 +1252,22 @@ export default function App() {
             ) : (
               <div className="pair">
                 <Field
-                  label={tunnelForm.kind === "remote" ? "远程绑定地址 (通常 0.0.0.0 或 127.0.0.1)" : "远端目标主机"}
+                  label={
+                    advancedMode && tunnelForm.kind === "remote"
+                      ? "远程绑定地址 (通常 0.0.0.0 或 127.0.0.1)"
+                      : "远端目标主机"
+                  }
                   value={tunnelForm.remoteHost}
                   set={(value) =>
                     setTunnelForm({ ...tunnelForm, remoteHost: value })
                   }
                 />
                 <Field
-                  label={tunnelForm.kind === "remote" ? "远程公网端口 (外部访问此端口)" : "远端目标端口"}
+                  label={
+                    advancedMode && tunnelForm.kind === "remote"
+                      ? "远程公网端口 (外部访问此端口)"
+                      : "远端目标端口"
+                  }
                   type="number"
                   value={tunnelForm.remotePort}
                   set={(value) =>
@@ -1072,7 +1277,7 @@ export default function App() {
               </div>
             )}
 
-            {tunnelForm.kind === "local" && (
+            {(!advancedMode || tunnelForm.kind === "local") && (
               <label className="check">
                 <input
                   type="checkbox"
@@ -1088,49 +1293,51 @@ export default function App() {
               </label>
             )}
 
-            {/* 隧道高级设置 */}
-            <div className="accordion-section">
-              <button
-                type="button"
-                className="accordion-toggle"
-                onClick={() => setShowAdvancedTunnel(!showAdvancedTunnel)}
-              >
-                <span>{showAdvancedTunnel ? "▼" : "▶"} 隧道高级参数（局域网网关共享、自定义 -o）</span>
-              </button>
-              {showAdvancedTunnel && (
-                <div className="accordion-content">
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={tunnelForm.gatewayPorts}
-                      onChange={(e) =>
-                        setTunnelForm({
-                          ...tunnelForm,
-                          gatewayPorts: e.target.checked,
-                          localHost: e.target.checked ? "0.0.0.0" : tunnelForm.localHost,
-                        })
-                      }
-                    />
-                    开启网关端口转发 (-g / GatewayPorts，允许局域网同伴机器连接)
-                  </label>
+            {/* 高级模式下才显示隧道高级参数折叠栏 */}
+            {advancedMode && (
+              <div className="accordion-section">
+                <button
+                  type="button"
+                  className="accordion-toggle"
+                  onClick={() => setShowAdvancedTunnel(!showAdvancedTunnel)}
+                >
+                  <span>{showAdvancedTunnel ? "▼" : "▶"} 隧道高级参数（局域网网关共享、自定义 -o）</span>
+                </button>
+                {showAdvancedTunnel && (
+                  <div className="accordion-content">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={tunnelForm.gatewayPorts}
+                        onChange={(e) =>
+                          setTunnelForm({
+                            ...tunnelForm,
+                            gatewayPorts: e.target.checked,
+                            localHost: e.target.checked ? "0.0.0.0" : tunnelForm.localHost,
+                          })
+                        }
+                      />
+                      开启网关端口转发 (-g / GatewayPorts，允许局域网同伴机器连接)
+                    </label>
 
-                  <label>
-                    自定义 OpenSSH 选项 (-o 参数，每行一条)
-                    <textarea
-                      rows={2}
-                      value={tunnelForm.customOptionsText}
-                      placeholder="ExitOnForwardFailure=yes"
-                      onChange={(e) =>
-                        setTunnelForm({
-                          ...tunnelForm,
-                          customOptionsText: e.target.value,
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-              )}
-            </div>
+                    <label>
+                      自定义 OpenSSH 选项 (-o 参数，每行一条)
+                      <textarea
+                        rows={2}
+                        value={tunnelForm.customOptionsText}
+                        placeholder="ExitOnForwardFailure=yes"
+                        onChange={(e) =>
+                          setTunnelForm({
+                            ...tunnelForm,
+                            customOptionsText: e.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+            )}
 
             {formError && (
               <p className="form-error" role="alert">
@@ -1270,7 +1477,7 @@ export default function App() {
             <p style={{ fontSize: "16px", fontWeight: "bold" }}>
               SSH Forward v{appVersion}
             </p>
-            <p>基于 OpenSSH 的本地端口转发、动态 SOCKS5 代理与内网穿透工具。</p>
+            <p>基于 OpenSSH 的本地端口转发、动态 SOCKS5 代理与内网穿透客户端。</p>
             <a href={repositoryUrl} target="_blank" rel="noreferrer">
               {repositoryUrl}
             </a>
