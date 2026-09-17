@@ -9,5 +9,14 @@ ssh-forward-config = { path = "../ssh-forward-config" }
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_JobObjects", "Win32_Foundation"] }
+# Win32_Security 门控 CreateJobObjectW（作业对象创建时的 SECURITY_ATTRIBUTES 参数），
+# Win32_System_Threading 门控 JOBOBJECT_EXTENDED_LIMIT_INFORMATION（限制信息结构体）。
+# 二者此前依赖工作区其它 crate 的 feature 合并才可见，单独构建本 crate 会报 E0432，
+# 因此在此显式声明，避免隐式依赖。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 

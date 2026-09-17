@@ -2,16 +2,29 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
 };
 
 #[cfg(windows)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::Serialize;
-use ssh_forward_config::{Auth, AuthType, Config, Endpoint, Host, Tunnel, load, validate};
-use ssh_forward_core::{remove_host, remove_tunnel, start_tunnel_with_password, update_tunnel};
+use serde::{Deserialize, Serialize};
+use ssh_forward_config::{
+    AuthType, Config, ConfigLock, Endpoint, Host, HostKeyPolicy, Settings, Tunnel, load, validate,
+};
+use ssh_forward_core::{
+    AuthInput,
+    HostDraft,
+    StartOptions,
+    TunnelDraft,
+    remove_host,
+    remove_tunnel,
+    // 与下方 #[tauri::command] fn start_tunnel 同名，必须重命名导入，否则报 E0255。
+    start_tunnel as start_tunnel_core,
+    upsert_host,
+    upsert_tunnel,
+};
 use ssh_forward_ssh::OpenSshForward;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -23,6 +36,9 @@ use windows_sys::Win32::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
     },
 };
+
+/// 诊断信息回传给界面时保留的最大行数。
+const DIAGNOSTIC_LINE_LIMIT: usize = 200;
 
 struct AppState {
     config_path: Mutex<PathBuf>,
@@ -42,6 +58,10 @@ struct TunnelStatus {
 struct Snapshot {
     path: String,
     version: String,
+    platform: String,
+    /// 密码认证依赖 Windows DPAPI，其它平台需要改用 SSH Agent 或私钥。
+    supports_password_auth: bool,
+    known_hosts_path: String,
     config: Config,
     statuses: HashMap<String, TunnelStatus>,
 }
@@ -87,15 +107,13 @@ fn default_tunnel_type() -> ssh_forward_config::TunnelType {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsInput {
-    strict_host_key_checking: bool,
+    host_key_policy: HostKeyPolicy,
     connect_timeout_seconds: u16,
     server_alive_interval_seconds: u16,
     server_alive_count_max: u16,
     tcp_keep_alive: bool,
     compression: bool,
 }
-
-use serde::Deserialize;
 
 fn config_path(state: &AppState) -> Result<PathBuf, String> {
     state
@@ -121,22 +139,70 @@ fn default_config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法定位应用配置目录：{error}"))
 }
 
-fn known_hosts_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or("无法定位当前用户主目录")?;
-    Ok(PathBuf::from(home).join(".ssh").join("known_hosts"))
+/// 应用私有数据目录（与 config.json 同级）。
+fn app_data_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn ensure_host_key(hostname: &str, port: u16) -> Result<(), String> {
-    let lookup_name = if port == 22 {
-        hostname.to_owned()
+/// 应用私有 known_hosts。
+///
+/// 刻意不使用 `~/.ssh/known_hosts`：应用不应替用户决定系统级的信任记录。
+fn app_known_hosts_path(config_path: &Path) -> PathBuf {
+    app_data_dir(config_path).join("known_hosts")
+}
+
+fn tunnel_log_path(config_path: &Path, tunnel_name: &str) -> PathBuf {
+    app_data_dir(config_path)
+        .join("logs")
+        .join(format!("tunnel-{}.log", sanitize_file_stem(tunnel_name)))
+}
+
+fn sanitize_file_stem(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unnamed".into()
     } else {
-        format!("[{hostname}]:{port}")
+        cleaned
+    }
+}
+
+fn platform_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+/// 把服务器的 Host Key 预登记到应用私有 known_hosts。
+///
+/// 仅在 `accept_new` 策略下调用。失败不阻断启动，交由主 OpenSSH 连接处理。
+fn prefetch_host_key(host: &Host, known_hosts: &Path) -> Result<(), String> {
+    let lookup_name = if host.port == 22 {
+        host.hostname.clone()
+    } else {
+        format!("[{}]:{}", host.hostname, host.port)
     };
+
     let mut lookup_cmd = Command::new("ssh-keygen");
     lookup_cmd
-        .args(["-F", &lookup_name])
+        .args(["-F", &lookup_name, "-f"])
+        .arg(known_hosts)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(windows)]
@@ -148,7 +214,7 @@ fn ensure_host_key(hostname: &str, port: u16) -> Result<(), String> {
 
     let mut scan_cmd = Command::new("ssh-keyscan");
     scan_cmd
-        .args(["-T", "5", "-p", &port.to_string(), hostname])
+        .args(["-T", "5", "-p", &host.port.to_string(), &host.hostname])
         .stdin(Stdio::null());
     #[cfg(windows)]
     scan_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -156,30 +222,27 @@ fn ensure_host_key(hostname: &str, port: u16) -> Result<(), String> {
     let scan = match scan_cmd.output() {
         Ok(output) if output.status.success() && !output.stdout.is_empty() => output,
         _ => {
-            // 如果 ssh-keyscan 预探测未获取到（例如网络防火墙拦截或特殊协议），不阻断启动，交由主 OpenSSH 连接处理
+            // 网络受限或协议特殊时探测不到，不阻断启动。
             return Ok(());
         }
     };
 
-    let path = match known_hosts_path() {
-        Ok(path) => path,
-        Err(_) => return Ok(()),
+    let Some(parent) = known_hosts.parent() else {
+        return Ok(());
     };
-    let parent = match path.parent() {
-        Some(parent) => parent,
-        None => return Ok(()),
-    };
-    let _ = std::fs::create_dir_all(parent);
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("无法创建 known_hosts 目录：{error}"))?;
+
     use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
-    {
-        let _ = file.write_all(&scan.stdout);
-        if !scan.stdout.ends_with(b"\n") {
-            let _ = file.write_all(b"\n");
-        }
+        .open(known_hosts)
+        .map_err(|error| format!("无法写入 {}：{error}", known_hosts.display()))?;
+    file.write_all(&scan.stdout)
+        .map_err(|error| format!("无法写入 {}：{error}", known_hosts.display()))?;
+    if !scan.stdout.ends_with(b"\n") {
+        let _ = file.write_all(b"\n");
     }
     Ok(())
 }
@@ -297,40 +360,118 @@ mod tests {
     }
 }
 
-fn build_auth(input: &HostInput, existing: Option<&Host>) -> Result<Auth, String> {
-    match input.auth_type {
-        AuthType::SshAgent => Ok(Auth::default()),
+/// 把界面输入转换为 core 的写入意图。
+///
+/// 密码只在用户真正输入了新值时加密；留空表示沿用已保存的密文，
+/// 因此编辑其它字段不再需要重新输入密码。
+fn host_draft(input: HostInput) -> Result<HostDraft, String> {
+    let auth = match input.auth_type {
+        AuthType::SshAgent => AuthInput::SshAgent,
         AuthType::PrivateKey => {
-            let private_key = input
+            let path = input
                 .private_key
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .ok_or("私钥认证需要提供私钥路径")?;
-            Ok(Auth {
-                kind: AuthType::PrivateKey,
-                private_key: Some(private_key),
-                credential_id: None,
-                encrypted_password: None,
-            })
+            AuthInput::PrivateKey { path }
         }
         AuthType::Password => {
-            if let Some(password) = input.password.as_deref().filter(|value| !value.is_empty()) {
-                return Ok(Auth {
-                    kind: AuthType::Password,
-                    private_key: None,
-                    credential_id: None,
-                    encrypted_password: Some(protect_password(password)?),
-                });
-            }
-            if let Some(host) = existing.filter(|host| host.auth.kind == AuthType::Password) {
-                return Ok(host.auth.clone());
-            }
-            if existing.is_none() {
-                return Err("密码认证需要输入密码".into());
-            }
-            Err("密码认证需要重新输入密码".into())
+            let encrypted_password = input
+                .password
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(protect_password)
+                .transpose()?;
+            AuthInput::Password { encrypted_password }
         }
+    };
+
+    Ok(HostDraft {
+        name: input.name,
+        hostname: input.hostname,
+        port: input.port,
+        username: input.username,
+        auth,
+        jump_host_id: input.jump_host_id,
+        proxy_command: input.proxy_command,
+        identities_only: input.identities_only,
+        certificate_file: input.certificate_file,
+        compression: input.compression,
+        custom_options: input.custom_options.unwrap_or_default(),
+        enabled: true,
+    })
+}
+
+fn tunnel_draft(input: TunnelInput) -> Result<TunnelDraft, String> {
+    let remote = match input.kind {
+        ssh_forward_config::TunnelType::Dynamic => None,
+        ssh_forward_config::TunnelType::Local | ssh_forward_config::TunnelType::Remote => {
+            let remote_host = input.remote_host.ok_or("远端目标主机不能为空")?;
+            let remote_port = input.remote_port.ok_or("远端目标端口不能为空")?;
+            Some(Endpoint {
+                host: remote_host,
+                port: remote_port,
+            })
+        }
+    };
+
+    Ok(TunnelDraft {
+        name: input.name,
+        host_name: input.host_name,
+        kind: input.kind,
+        local: Endpoint {
+            host: input.local_host,
+            port: input.local_port,
+        },
+        remote,
+        gateway_ports: input.gateway_ports.unwrap_or(false),
+        custom_options: input.custom_options.unwrap_or_default(),
+        auto_open_browser: input.auto_open_browser,
+    })
+}
+
+/// OpenSSH 退出且没有可用 stderr 时的兜底提示（按认证类型给出排查方向）。
+fn auth_hint(config: &Config, tunnel_name: &str) -> &'static str {
+    config
+        .tunnels
+        .iter()
+        .find(|tunnel| tunnel.name == tunnel_name)
+        .and_then(|tunnel| config.hosts.iter().find(|host| host.id == tunnel.host_id))
+        .map(|host| match host.auth.kind {
+            AuthType::SshAgent => {
+                "OpenSSH 进程已退出：当前服务器为【SSH Agent】认证。若本机未开启 ssh-agent 服务或未添加密钥将导致连接失败。建议在左侧编辑服务器切换为【密码】或【私钥】认证。"
+            }
+            AuthType::Password => {
+                "OpenSSH 进程已退出：请检查服务器密码是否正确、用户名及端口是否可达。"
+            }
+            AuthType::PrivateKey => {
+                "OpenSSH 进程已退出：请检查私钥文件路径是否存在、格式权限是否正确。"
+            }
+        })
+        .unwrap_or("OpenSSH 进程已退出；请检查认证、Host Key 或网络连接")
+}
+
+/// 优先展示 OpenSSH 的真实输出，只有在拿不到输出时才退回猜测式提示。
+fn describe_exit(config: &Config, tunnel_name: &str, stderr_tail: &[String]) -> String {
+    if stderr_tail.is_empty() {
+        return auth_hint(config, tunnel_name).into();
     }
+    let recent = stderr_tail
+        .iter()
+        .rev()
+        .take(8)
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("OpenSSH 已退出，原始输出：\n{recent}")
+}
+
+fn read_log_tail(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(DIAGNOSTIC_LINE_LIMIT);
+    Some(lines[start..].join("\n"))
 }
 
 fn snapshot(state: &AppState) -> Result<Snapshot, String> {
@@ -348,28 +489,12 @@ fn snapshot(state: &AppState) -> Result<Snapshot, String> {
             Ok(true) => {}
             Ok(false) => {
                 exited.push(name.clone());
-                let error_hint = config
-                    .tunnels
-                    .iter()
-                    .find(|t| t.name == *name)
-                    .and_then(|t| config.hosts.iter().find(|h| h.id == t.host_id))
-                    .map(|h| match h.auth.kind {
-                        AuthType::SshAgent => {
-                            "OpenSSH 进程已退出：当前服务器为【SSH Agent】认证。若本机未开启 ssh-agent 服务或未添加密钥将导致连接失败。建议在左侧编辑服务器切换为【密码】或【私钥】认证。"
-                        }
-                        AuthType::Password => {
-                            "OpenSSH 进程已退出：请检查服务器密码是否正确、用户名及端口是否可达。"
-                        }
-                        AuthType::PrivateKey => {
-                            "OpenSSH 进程已退出：请检查私钥文件路径是否存在、格式权限是否正确。"
-                        }
-                    })
-                    .unwrap_or("OpenSSH 进程已退出；请检查认证、Host Key 或网络连接");
+                let message = describe_exit(&config, name, &forward.stderr_tail());
                 statuses.insert(
                     name.clone(),
                     TunnelStatus {
                         state: "error".into(),
-                        message: Some(error_hint.into()),
+                        message: Some(message),
                     },
                 );
             }
@@ -393,6 +518,9 @@ fn snapshot(state: &AppState) -> Result<Snapshot, String> {
     Ok(Snapshot {
         path: path.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: platform_name().into(),
+        supports_password_auth: cfg!(windows),
+        known_hosts_path: app_known_hosts_path(&path).display().to_string(),
         config,
         statuses,
     })
@@ -434,52 +562,27 @@ fn validate_config(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn save_settings(
-    input: SettingsInput,
-    state: State<'_, AppState>,
-) -> Result<ssh_forward_config::Settings, String> {
+fn save_settings(input: SettingsInput, state: State<'_, AppState>) -> Result<Settings, String> {
     let path = config_path(&state)?;
-    let mut config = load(&path).map_err(|e| e.to_string())?;
-    config.settings = ssh_forward_config::Settings {
-        strict_host_key_checking: input.strict_host_key_checking,
+    let _guard = ConfigLock::acquire(&path).map_err(|error| error.to_string())?;
+    let mut config = load(&path).map_err(|error| error.to_string())?;
+    config.settings = Settings {
+        host_key_policy: input.host_key_policy,
         connect_timeout_seconds: input.connect_timeout_seconds,
         server_alive_interval_seconds: input.server_alive_interval_seconds,
         server_alive_count_max: input.server_alive_count_max,
         tcp_keep_alive: input.tcp_keep_alive,
         compression: input.compression,
     };
-    validate(&config).map_err(|e| e.to_string())?;
-    ssh_forward_config::save(&path, &config).map_err(|e| e.to_string())?;
+    validate(&config).map_err(|error| error.to_string())?;
+    ssh_forward_config::save(&path, &config).map_err(|error| error.to_string())?;
     Ok(config.settings)
 }
 
 #[tauri::command]
 fn create_host(input: HostInput, state: State<'_, AppState>) -> Result<Host, String> {
-    let auth = build_auth(&input, None)?;
-    let path = config_path(&state)?;
-    let mut config = load(&path).map_err(|e| e.to_string())?;
-    if config.hosts.iter().any(|h| h.name == input.name) {
-        return Err(format!("已存在名为 '{}' 的服务器", input.name));
-    }
-    let host = Host {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: input.name,
-        hostname: input.hostname,
-        port: input.port,
-        username: input.username,
-        auth,
-        jump_host_id: input.jump_host_id.filter(|s| !s.trim().is_empty()),
-        proxy_command: input.proxy_command.filter(|s| !s.trim().is_empty()),
-        identities_only: input.identities_only,
-        certificate_file: input.certificate_file.filter(|s| !s.trim().is_empty()),
-        compression: input.compression,
-        custom_options: input.custom_options.unwrap_or_default(),
-        enabled: true,
-    };
-    config.hosts.push(host.clone());
-    validate(&config).map_err(|e| e.to_string())?;
-    ssh_forward_config::save(&path, &config).map_err(|e| e.to_string())?;
-    Ok(host)
+    let draft = host_draft(input)?;
+    upsert_host(&config_path(&state)?, None, draft).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -488,34 +591,9 @@ fn edit_host(
     input: HostInput,
     state: State<'_, AppState>,
 ) -> Result<Host, String> {
-    let path = config_path(&state)?;
-    let mut config = load(&path).map_err(|e| e.to_string())?;
-    let index = config
-        .hosts
-        .iter()
-        .position(|host| host.name == original_name)
-        .ok_or("未找到服务器")?;
-    let existing = &config.hosts[index];
-    let auth = build_auth(&input, Some(existing))?;
-    let host = Host {
-        id: existing.id.clone(),
-        name: input.name,
-        hostname: input.hostname,
-        port: input.port,
-        username: input.username,
-        auth,
-        jump_host_id: input.jump_host_id.filter(|s| !s.trim().is_empty()),
-        proxy_command: input.proxy_command.filter(|s| !s.trim().is_empty()),
-        identities_only: input.identities_only,
-        certificate_file: input.certificate_file.filter(|s| !s.trim().is_empty()),
-        compression: input.compression,
-        custom_options: input.custom_options.unwrap_or_default(),
-        enabled: existing.enabled,
-    };
-    config.hosts[index] = host.clone();
-    validate(&config).map_err(|e| e.to_string())?;
-    ssh_forward_config::save(&path, &config).map_err(|e| e.to_string())?;
-    Ok(host)
+    let draft = host_draft(input)?;
+    upsert_host(&config_path(&state)?, Some(&original_name), draft)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -525,32 +603,8 @@ fn delete_host(name: String, state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn create_tunnel(input: TunnelInput, state: State<'_, AppState>) -> Result<Tunnel, String> {
-    let remote = match input.kind {
-        ssh_forward_config::TunnelType::Dynamic => None,
-        ssh_forward_config::TunnelType::Local | ssh_forward_config::TunnelType::Remote => {
-            let remote_host = input.remote_host.ok_or("远端目标主机不能为空")?;
-            let remote_port = input.remote_port.ok_or("远端目标端口不能为空")?;
-            Some(Endpoint {
-                host: remote_host,
-                port: remote_port,
-            })
-        }
-    };
-    ssh_forward_core::add_tunnel_full(
-        &config_path(&state)?,
-        input.name,
-        &input.host_name,
-        input.kind,
-        Endpoint {
-            host: input.local_host,
-            port: input.local_port,
-        },
-        remote,
-        input.gateway_ports.unwrap_or(false),
-        input.custom_options.unwrap_or_default(),
-        input.auto_open_browser,
-    )
-    .map_err(|error| error.to_string())
+    let draft = tunnel_draft(input)?;
+    upsert_tunnel(&config_path(&state)?, None, draft).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -559,12 +613,6 @@ fn edit_tunnel(
     input: TunnelInput,
     state: State<'_, AppState>,
 ) -> Result<Tunnel, String> {
-    let existing = snapshot(&state)?
-        .config
-        .tunnels
-        .into_iter()
-        .find(|tunnel| tunnel.name == original_name)
-        .ok_or("未找到 Tunnel")?;
     if state
         .forwards
         .lock()
@@ -573,40 +621,9 @@ fn edit_tunnel(
     {
         return Err("请先停止 Tunnel 再编辑".into());
     }
-    let remote = match input.kind {
-        ssh_forward_config::TunnelType::Dynamic => None,
-        ssh_forward_config::TunnelType::Local | ssh_forward_config::TunnelType::Remote => {
-            let remote_host = input.remote_host.ok_or("远端目标主机不能为空")?;
-            let remote_port = input.remote_port.ok_or("远端目标端口不能为空")?;
-            Some(Endpoint {
-                host: remote_host,
-                port: remote_port,
-            })
-        }
-    };
-    update_tunnel(
-        &config_path(&state)?,
-        &original_name,
-        Tunnel {
-            id: existing.id,
-            name: input.name,
-            host_id: existing.host_id,
-            kind: input.kind,
-            local: Endpoint {
-                host: input.local_host,
-                port: input.local_port,
-            },
-            remote,
-            gateway_ports: input.gateway_ports.unwrap_or(false),
-            custom_options: input.custom_options.unwrap_or_default(),
-            auto_start: existing.auto_start,
-            auto_reconnect: existing.auto_reconnect,
-            auto_open_browser: input.auto_open_browser,
-            enabled: existing.enabled,
-        },
-        &input.host_name,
-    )
-    .map_err(|error| error.to_string())
+    let draft = tunnel_draft(input)?;
+    upsert_tunnel(&config_path(&state)?, Some(&original_name), draft)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -636,7 +653,9 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
                 message: None,
             },
         );
+
     let run_start = || -> Result<(), String> {
+        let path = config_path(&state)?;
         let config = snapshot(&state)?.config;
         let tunnel = config
             .tunnels
@@ -648,7 +667,12 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
             .iter()
             .find(|host| host.id == tunnel.host_id)
             .ok_or("未找到 Tunnel 对应的服务器")?;
-        ensure_host_key(&host.hostname, host.port)?;
+
+        let known_hosts = app_known_hosts_path(&path);
+        if config.settings.host_key_policy.should_prefetch() {
+            prefetch_host_key(host, &known_hosts)?;
+        }
+
         let password = match host.auth.kind {
             AuthType::Password => unprotect_password(
                 host.auth
@@ -659,8 +683,19 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
             .map(Some),
             _ => Ok(None),
         }?;
-        let forward = start_tunnel_with_password(&config, &name, password.as_deref())
-            .map_err(|e| e.to_string())?;
+
+        let log_path = tunnel_log_path(&path, &tunnel.name);
+        let forward = start_tunnel_core(
+            &config,
+            &name,
+            StartOptions {
+                password: password.as_deref(),
+                known_hosts: Some(&known_hosts),
+                log_path: Some(&log_path),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
         state
             .forwards
             .lock()
@@ -686,8 +721,8 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
     match run_start() {
         Ok(()) => Ok(()),
         Err(error) => {
-            let _ = state.statuses.lock().map(|mut s| {
-                s.insert(
+            let _ = state.statuses.lock().map(|mut statuses| {
+                statuses.insert(
                     name,
                     TunnelStatus {
                         state: "error".into(),
@@ -698,6 +733,28 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
             Err(error)
         }
     }
+}
+
+/// 返回某个 Tunnel 的诊断信息：优先取内存中的 OpenSSH 输出，其次读落盘日志。
+#[tauri::command]
+fn get_tunnel_diagnostics(name: String, state: State<'_, AppState>) -> Result<String, String> {
+    let path = config_path(&state)?;
+    if let Ok(forwards) = state.forwards.lock()
+        && let Some(forward) = forwards.get(&name)
+    {
+        let text = forward.diagnostics_text();
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+
+    let log_path = tunnel_log_path(&path, &name);
+    read_log_tail(&log_path).ok_or_else(|| {
+        format!(
+            "暂无诊断信息（日志文件 {} 不存在或为空）",
+            log_path.display()
+        )
+    })
 }
 
 #[tauri::command]
@@ -745,6 +802,15 @@ fn cleanup_forwards(state: &AppState) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _cwd| {
+                // 第二个实例不再各自持有转发，而是把已有窗口带到前台。
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            },
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.manage(AppState {
@@ -778,6 +844,7 @@ fn main() {
             edit_tunnel,
             delete_tunnel,
             start_tunnel,
+            get_tunnel_diagnostics,
             open_tunnel_in_browser,
             stop_tunnel
         ])

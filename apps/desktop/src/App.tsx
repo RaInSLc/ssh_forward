@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import { FormEvent, useEffect, useId, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -7,6 +7,7 @@ type AuthType = "ssh_agent" | "private_key" | "password";
 type TunnelType = "local" | "dynamic" | "remote";
 type Theme = "light" | "dark";
 type ViewMode = "grid" | "table";
+type HostKeyPolicy = "accept_new" | "strict" | "insecure";
 
 type Host = {
   id: string;
@@ -40,7 +41,7 @@ type Tunnel = {
 };
 
 type Settings = {
-  strict_host_key_checking: boolean;
+  host_key_policy: HostKeyPolicy;
   connect_timeout_seconds: number;
   server_alive_interval_seconds: number;
   server_alive_count_max: number;
@@ -56,12 +57,23 @@ type Status = {
 type Snapshot = {
   path: string;
   version?: string;
+  platform?: string;
+  supportsPasswordAuth?: boolean;
+  knownHostsPath?: string;
   config: {
     settings: Settings;
     hosts: Host[];
     tunnels: Tunnel[];
   };
   statuses: Record<string, Status>;
+};
+
+/** 转发列表的分组单元：一个分组对应一台服务器（或"未关联"兜底分组）。 */
+type TunnelGroup = {
+  key: string;
+  name: string;
+  caption: string;
+  tunnels: Tunnel[];
 };
 
 type HostForm = {
@@ -94,7 +106,7 @@ type TunnelForm = {
 };
 
 type SettingsForm = {
-  strictHostKeyChecking: boolean;
+  hostKeyPolicy: HostKeyPolicy;
   connectTimeoutSeconds: number;
   serverAliveIntervalSeconds: number;
   serverAliveCountMax: number;
@@ -134,13 +146,19 @@ const newTunnel = (): TunnelForm => ({
 });
 
 const newSettings = (): SettingsForm => ({
-  strictHostKeyChecking: true,
+  hostKeyPolicy: "accept_new",
   connectTimeoutSeconds: 10,
   serverAliveIntervalSeconds: 15,
   serverAliveCountMax: 3,
   tcpKeepAlive: true,
   compression: false,
 });
+
+const hostKeyPolicyLabels: Record<HostKeyPolicy, string> = {
+  accept_new: "首次连接自动登记，密钥变更则拒绝（推荐）",
+  strict: "仅接受已知主机，未知主机直接拒绝",
+  insecure: "不校验主机密钥（存在中间人风险）",
+};
 
 const storedTheme = (): Theme =>
   localStorage.getItem("ssh-forward-theme") === "dark" ? "dark" : "light";
@@ -150,6 +168,10 @@ const storedAdvancedMode = (): boolean =>
 
 const storedViewMode = (): ViewMode =>
   localStorage.getItem("ssh-forward-view-mode") === "table" ? "table" : "grid";
+
+/** 分组默认开启：多服务器场景下平铺列表难以辨认归属。显式关闭后才持久化为 "false"。 */
+const storedGroupByHost = (): boolean =>
+  localStorage.getItem("ssh-forward-group-by-host") !== "false";
 
 const fetchAvailablePort = async (host?: string): Promise<number> => {
   try {
@@ -177,9 +199,24 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(storedTheme);
   const [advancedMode, setAdvancedMode] = useState<boolean>(storedAdvancedMode);
   const [viewMode, setViewMode] = useState<ViewMode>(storedViewMode);
+  const [groupByHost, setGroupByHost] = useState<boolean>(storedGroupByHost);
+  // 折叠状态只存在内存中，不持久化：避免下次启动时"内容不见了"的困惑。
+  const [collapsedGroups, setCollapsedGroups] = useState<string[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<{
+    tunnel: string;
+    text: string;
+  } | null>(null);
+  const [loadingDiagnostics, setLoadingDiagnostics] = useState(false);
 
-  const appVersion = snapshot?.version ?? "0.1.15";
+  // 版本号只信任后端返回值，避免硬编码兜底值在升级后过期。
+  const appVersion = snapshot?.version ?? "—";
+  const supportsPasswordAuth = snapshot?.supportsPasswordAuth ?? true;
+  const platform = snapshot?.platform ?? "";
+
+  // 密码认证依赖 Windows DPAPI，其它平台不能把"密码"作为默认推荐项。
+  const defaultAuthType = (): AuthType =>
+    supportsPasswordAuth ? "password" : "ssh_agent";
 
   const [updateAvailable, setUpdateAvailable] = useState<Update | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -197,6 +234,18 @@ export default function App() {
     const next: ViewMode = viewMode === "grid" ? "table" : "grid";
     setViewMode(next);
     localStorage.setItem("ssh-forward-view-mode", next);
+  };
+
+  const toggleGroupByHost = () => {
+    const next = !groupByHost;
+    setGroupByHost(next);
+    localStorage.setItem("ssh-forward-group-by-host", String(next));
+  };
+
+  const toggleGroupCollapsed = (key: string) => {
+    setCollapsedGroups((current) =>
+      current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+    );
   };
 
   const checkForUpdates = async (manual = true) => {
@@ -275,7 +324,7 @@ export default function App() {
       setSnapshot(res);
       if (res.config?.settings) {
         setSettingsForm({
-          strictHostKeyChecking: res.config.settings.strict_host_key_checking ?? true,
+          hostKeyPolicy: res.config.settings.host_key_policy ?? "accept_new",
           connectTimeoutSeconds: res.config.settings.connect_timeout_seconds ?? 10,
           serverAliveIntervalSeconds: res.config.settings.server_alive_interval_seconds ?? 15,
           serverAliveCountMax: res.config.settings.server_alive_count_max ?? 3,
@@ -360,6 +409,12 @@ export default function App() {
       .map((s) => s.trim())
       .filter(Boolean);
 
+    // 基础模式下高级字段不在表单里渲染。这里必须沿用原有值而不是写 null，
+    // 否则用户只是改个端口，跳板机 / ProxyCommand / 证书就会被静默清空。
+    const original = hostEditing
+      ? (snapshot?.config.hosts ?? []).find((item) => item.name === hostEditing)
+      : undefined;
+
     const input = {
       name: hostForm.name,
       hostname: hostForm.hostname,
@@ -368,12 +423,28 @@ export default function App() {
       authType: hostForm.authType,
       password: hostForm.password || null,
       privateKey: hostForm.privateKey || null,
-      jumpHostId: advancedMode ? hostForm.jumpHostId || null : null,
-      proxyCommand: advancedMode ? hostForm.proxyCommand || null : null,
-      identitiesOnly: advancedMode ? hostForm.identitiesOnly : true,
-      certificateFile: advancedMode ? hostForm.certificateFile || null : null,
-      compression: advancedMode ? hostForm.compression : false,
-      customOptions: advancedMode && customOptions.length ? customOptions : null,
+      jumpHostId: advancedMode
+        ? hostForm.jumpHostId || null
+        : original?.jump_host_id ?? null,
+      proxyCommand: advancedMode
+        ? hostForm.proxyCommand || null
+        : original?.proxy_command ?? null,
+      identitiesOnly: advancedMode
+        ? hostForm.identitiesOnly
+        : original?.identities_only ?? true,
+      certificateFile: advancedMode
+        ? hostForm.certificateFile || null
+        : original?.certificate_file ?? null,
+      compression: advancedMode
+        ? hostForm.compression
+        : original?.compression ?? false,
+      customOptions: advancedMode
+        ? customOptions.length
+          ? customOptions
+          : null
+        : original?.custom_options?.length
+          ? original.custom_options
+          : null,
     };
     const error = await action(
       hostEditing ? "edit_host" : "create_host",
@@ -384,7 +455,7 @@ export default function App() {
     } else {
       setPanel(null);
       setHostEditing(null);
-      setHostForm(newHost());
+      setHostForm({ ...newHost(), authType: defaultAuthType() });
     }
   };
 
@@ -426,8 +497,16 @@ export default function App() {
   const saveGlobalSettings = async (event: FormEvent) => {
     event.preventDefault();
     setFormError("");
+    if (
+      settingsForm.hostKeyPolicy === "insecure" &&
+      !window.confirm(
+        "关闭主机密钥校验后，中间人攻击将无法被察觉，且服务器密钥变更也不会被拒绝。确定要使用该策略吗？"
+      )
+    ) {
+      return;
+    }
     const input = {
-      strictHostKeyChecking: settingsForm.strictHostKeyChecking,
+      hostKeyPolicy: settingsForm.hostKeyPolicy,
       connectTimeoutSeconds: Number(settingsForm.connectTimeoutSeconds),
       serverAliveIntervalSeconds: Number(settingsForm.serverAliveIntervalSeconds),
       serverAliveCountMax: Number(settingsForm.serverAliveCountMax),
@@ -442,9 +521,131 @@ export default function App() {
     }
   };
 
+  const showDiagnostics = async (name: string) => {
+    setLoadingDiagnostics(true);
+    setDiagnostics({ tunnel: name, text: "" });
+    try {
+      const text = await invoke<string>("get_tunnel_diagnostics", { name });
+      setDiagnostics({ tunnel: name, text });
+    } catch (error) {
+      setDiagnostics({ tunnel: name, text: String(error) });
+    } finally {
+      setLoadingDiagnostics(false);
+    }
+  };
+
   const hosts = snapshot?.config.hosts ?? [];
   const tunnels = snapshot?.config.tunnels ?? [];
   const statuses = snapshot?.statuses ?? {};
+
+  /**
+   * 按所属服务器把转发分组。分组顺序沿用服务器列表顺序，组内沿用配置中的原顺序。
+   * `host_id` 指向不存在服务器的条目（校验层理论上已拦截，见 validation.rs）归入
+   * 末尾的「未关联」分组，避免这类条目在界面上凭空消失。
+   */
+  const hostGroups: TunnelGroup[] = (() => {
+    const hostIds = new Set(hosts.map((host) => host.id));
+    const groups: TunnelGroup[] = hosts
+      .map((host) => ({
+        key: host.id,
+        name: host.name,
+        caption: `${host.username}@${host.hostname}:${host.port}`,
+        tunnels: tunnels.filter((tunnel) => tunnel.host_id === host.id),
+      }))
+      .filter((group) => group.tunnels.length > 0);
+    const orphans = tunnels.filter((tunnel) => !hostIds.has(tunnel.host_id));
+    if (orphans.length) {
+      groups.push({
+        key: "__orphan__",
+        name: "未关联服务器",
+        caption: "配置中引用的服务器已不存在",
+        tunnels: orphans,
+      });
+    }
+    return groups;
+  })();
+
+  // 关闭分组时退化为单个分组且不渲染组头，等同于原有的平铺效果。
+  const displayedGroups: TunnelGroup[] = groupByHost
+    ? hostGroups
+    : [{ key: "__flat__", name: "", caption: "", tunnels }];
+
+  const isGroupCollapsed = (key: string) =>
+    groupByHost && collapsedGroups.includes(key);
+
+  /** 组内处于「运行中」的转发数量，用于组头统计。 */
+  const runningCountOf = (group: TunnelGroup): number =>
+    group.tunnels.filter(
+      (tunnel) => (statuses[tunnel.name]?.state ?? "stopped") === "running"
+    ).length;
+
+  /** 生成不与现有转发重名的副本名称：`web-副本`、`web-副本2`、`web-副本3`…… */
+  const duplicateTunnelName = (base: string): string => {
+    const taken = new Set(tunnels.map((tunnel) => tunnel.name));
+    const stem = `${base}-副本`;
+    if (!taken.has(stem)) return stem;
+    for (let index = 2; index <= 1000; index += 1) {
+      const candidate = `${stem}${index}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    // 极端情况（同名副本已存在上千个）退回时间戳，保证名称一定能用。
+    return `${stem}${Date.now()}`;
+  };
+
+  /**
+   * 以现有转发为模板打开**新建**表单（不是编辑）。
+   *
+   * 端口原样复制：副本的语义是「以它为模板」，自动改端口会让用户不知道新端口是多少，
+   * 反而更困惑。代价是副本与原条目端口相同、无法同时启动——这一点由表单内的
+   * 端口冲突提示显式告知，而不是静默处理。
+   *
+   * 保真：保存路径会按 `advancedMode` 丢弃它无法表达的字段（`kind` 回退为 `local`、
+   * `gateway_ports` 置 `false`、`custom_options` 置 `null`）。列表并不按类型过滤，
+   * 基础模式下同样会显示反向/动态隧道，因此源条目只要用到其中任何一项，
+   * 就必须先把高级模式打开，否则「创建副本」会静默把反向/动态隧道变成本地转发。
+   */
+  const duplicateTunnel = (tunnel: Tunnel) => {
+    setFormError("");
+    const host = hosts.find((item) => item.id === tunnel.host_id);
+    setTunnelEditing(null);
+
+    const needsAdvancedMode =
+      (tunnel.type ?? "local") !== "local" ||
+      Boolean(tunnel.gateway_ports) ||
+      Boolean(tunnel.custom_options?.length);
+    if (needsAdvancedMode && !advancedMode) {
+      setAdvancedMode(true);
+      localStorage.setItem("ssh-forward-advanced-mode", "true");
+    }
+
+    setShowAdvancedTunnel(
+      Boolean(tunnel.gateway_ports || tunnel.custom_options?.length)
+    );
+    setTunnelForm({
+      name: duplicateTunnelName(tunnel.name),
+      hostName: host?.name ?? "",
+      kind: tunnel.type ?? "local",
+      localHost: tunnel.local.host,
+      localPort: tunnel.local.port,
+      remoteHost: tunnel.remote?.host ?? "127.0.0.1",
+      remotePort: tunnel.remote?.port ?? 8888,
+      gatewayPorts: tunnel.gateway_ports ?? false,
+      autoOpenBrowser: tunnel.auto_open_browser ?? false,
+      customOptionsText: (tunnel.custom_options ?? []).join("\n"),
+    });
+    setPanel("tunnel");
+  };
+
+  /**
+   * 正在编辑/新建的表单端口与既有条目冲突时的提示依据。
+   * 端口转发在同一台机器上不能重复监听，静默冲突会让用户到"启动"时才失败且不知原因。
+   */
+  const portConflict = tunnels.find(
+    (tunnel) =>
+      tunnel.name !== tunnelEditing &&
+      tunnel.local.host === tunnelForm.localHost &&
+      tunnel.local.port === Number(tunnelForm.localPort)
+  );
 
   const closePanel = () => {
     setFormError("");
@@ -480,7 +681,7 @@ export default function App() {
             compression: host.compression ?? false,
             customOptionsText: (host.custom_options ?? []).join("\n"),
           }
-        : newHost()
+        : { ...newHost(), authType: defaultAuthType() }
     );
     setPanel("host");
   };
@@ -538,7 +739,12 @@ export default function App() {
 
         <div className="sidebar-section-header">
           <p className="eyebrow">HOSTS / 服务器列表</p>
-          <button className="icon-btn" title="添加服务器" onClick={() => openHost()}>
+          <button
+            className="icon-btn"
+            aria-label="添加服务器"
+            title="添加服务器"
+            onClick={() => openHost()}
+          >
             +
           </button>
         </div>
@@ -549,7 +755,7 @@ export default function App() {
               key={host.id}
               onClick={() => openHost(host)}
             >
-              <i></i>
+              <i aria-hidden="true"></i>
               <span>
                 <b>{host.name}</b>
                 <small>
@@ -569,11 +775,10 @@ export default function App() {
           + 添加服务器
         </button>
 
-        {advancedMode && (
-          <button className="settings-link-btn" onClick={openSettings}>
-            ⚙️ 全局网络与保活设置
-          </button>
-        )}
+        {/* 设置入口常驻：主机密钥策略等安全项在基础模式下也必须可达 */}
+        <button className="settings-link-btn" onClick={openSettings}>
+          ⚙️ 全局网络与保活设置
+        </button>
 
         <footer>
           <span>{notice}</span>
@@ -613,6 +818,16 @@ export default function App() {
               {viewMode === "grid" ? "📋 切换表格" : "🗂️ 切换卡片"}
             </button>
 
+            {/* 分组开关：多服务器场景下按服务器归类转发，避免平铺列表难以辨认归属 */}
+            <button
+              className={`view-toggle-btn ${groupByHost ? "active" : ""}`}
+              onClick={toggleGroupByHost}
+              aria-pressed={groupByHost}
+              title="按服务器分组显示转发列表"
+            >
+              {groupByHost ? "📁 已分组" : "📁 分组"}
+            </button>
+
             <button
               className="theme-toggle"
               onClick={() => setTheme(theme === "light" ? "dark" : "light")}
@@ -637,13 +852,46 @@ export default function App() {
               <thead>
                 <tr>
                   <th style={{ width: "22%" }}>名称 / 模式</th>
-                  <th style={{ width: "40%" }}>转发链路 / 路由</th>
+                  {/* 转发链路列收窄至 32%：该单元格是 flex-wrap 容器，收窄不会挤压内容。
+                      操作列由 26% 放宽到 34%，容纳新增的「副本」按钮（.table-actions 为 nowrap）。 */}
+                  <th style={{ width: "32%" }}>转发链路 / 路由</th>
                   <th style={{ width: "12%" }}>状态</th>
-                  <th style={{ width: "26%", textAlign: "right" }}>操作</th>
+                  <th style={{ width: "34%", textAlign: "right" }}>操作</th>
                 </tr>
               </thead>
               <tbody>
-                {tunnels.map((tunnel) => {
+                {/* 用 flatMap 把「组头 + 组内条目」摊平成同级序列：tbody 只能直接放 tr，
+                    而分组头本身也是一行，这样不必嵌套两层 map。 */}
+                {displayedGroups.flatMap((group) => [
+                  ...(groupByHost
+                    ? [
+                        <tr className="tunnel-group-row" key={`group-${group.key}`}>
+                          <td colSpan={4}>
+                            <button
+                              type="button"
+                              className="tunnel-group-toggle"
+                              aria-expanded={!isGroupCollapsed(group.key)}
+                              onClick={() => toggleGroupCollapsed(group.key)}
+                            >
+                              <span className="tunnel-group-caret">
+                                {isGroupCollapsed(group.key) ? "▶" : "▼"}
+                              </span>
+                              <strong>{group.name}</strong>
+                              <span className="tunnel-group-caption">{group.caption}</span>
+                              <span className="tunnel-group-count">
+                                {group.tunnels.length} 条转发
+                                {runningCountOf(group)
+                                  ? ` · ${runningCountOf(group)} 运行中`
+                                  : ""}
+                              </span>
+                            </button>
+                          </td>
+                        </tr>,
+                      ]
+                    : []),
+                  ...(isGroupCollapsed(group.key)
+                    ? []
+                    : group.tunnels.map((tunnel) => {
                   const status = statuses[tunnel.name] ?? { state: "stopped" as const };
                   const running = status.state === "running";
                   const host = hosts.find((h) => h.id === tunnel.host_id);
@@ -671,7 +919,16 @@ export default function App() {
                           )}
                         </div>
                         {status.message && (
-                          <div className="table-error-hint">{status.message}</div>
+                          <div className="table-error-hint">
+                            {status.message}
+                            <button
+                              type="button"
+                              className="error-action-btn"
+                              onClick={() => void showDiagnostics(tunnel.name)}
+                            >
+                              📄 查看诊断日志
+                            </button>
+                          </div>
                         )}
                       </td>
                       <td>
@@ -757,6 +1014,16 @@ export default function App() {
                           <button className="btn-sm" onClick={() => openTunnel(tunnel)}>
                             编辑
                           </button>
+                          {/* 表格操作列是 nowrap 且已接近饱和，故用短标签「副本」；
+                              可访问名统一为「创建副本」，与卡片视图保持一致。 */}
+                          <button
+                            className="btn-sm"
+                            aria-label="创建副本"
+                            title="以该条目为模板创建新条目"
+                            onClick={() => duplicateTunnel(tunnel)}
+                          >
+                            副本
+                          </button>
                           <button
                             className="btn-sm danger-link"
                             onClick={() => void deleteTunnel(tunnel.name)}
@@ -766,161 +1033,205 @@ export default function App() {
                         </div>
                       </td>
                     </tr>
-                  );
-                })}
+                        );
+                      })),
+                ])}
               </tbody>
             </table>
           </div>
 
           {/* 卡片视图 Card Grid View */}
           <div className="tunnels-grid">
-            {tunnels.map((tunnel) => {
-              const status = statuses[tunnel.name] ?? {
-                state: "stopped" as const,
-              };
-              const running = status.state === "running";
-              const host = hosts.find((h) => h.id === tunnel.host_id);
-              const isDynamic = tunnel.type === "dynamic";
-              const isRemote = tunnel.type === "remote";
-              const socksAddress = `socks5://${tunnel.local.host}:${tunnel.local.port}`;
-              const localAddress = `http://${tunnel.local.host}:${tunnel.local.port}`;
+            {/* 每个分组是独立的 .tunnel-group：组头独占一行，组内卡片各成一张网格，
+                这样不同分组的卡片不会混排在同一行（组头若只是跨列的 grid item，
+                后一组的卡片仍可能与前一组的卡片同处一行，分组在视觉上就不成立）。 */}
+            {displayedGroups.map((group) => (
+              <section className="tunnel-group" key={group.key}>
+                {groupByHost && (
+                  <button
+                    type="button"
+                    className="tunnel-group-toggle"
+                    aria-expanded={!isGroupCollapsed(group.key)}
+                    onClick={() => toggleGroupCollapsed(group.key)}
+                  >
+                    <span className="tunnel-group-caret">
+                      {isGroupCollapsed(group.key) ? "▶" : "▼"}
+                    </span>
+                    <strong>{group.name}</strong>
+                    <span className="tunnel-group-caption">{group.caption}</span>
+                    <span className="tunnel-group-count">
+                      {group.tunnels.length} 条转发
+                      {runningCountOf(group) ? ` · ${runningCountOf(group)} 运行中` : ""}
+                    </span>
+                  </button>
+                )}
+                <div className="tunnel-group-cards">
+                  {!isGroupCollapsed(group.key) &&
+                    group.tunnels.map((tunnel) => {
+                      const status = statuses[tunnel.name] ?? {
+                        state: "stopped" as const,
+                      };
+                      const running = status.state === "running";
+                      const host = hosts.find((h) => h.id === tunnel.host_id);
+                      const isDynamic = tunnel.type === "dynamic";
+                      const isRemote = tunnel.type === "remote";
+                      const socksAddress = `socks5://${tunnel.local.host}:${tunnel.local.port}`;
+                      const localAddress = `http://${tunnel.local.host}:${tunnel.local.port}`;
 
-              return (
-                <article key={tunnel.id} className={`tunnel-card ${tunnel.type}`}>
-                  <div className="tunnel-head">
-                    <div>
-                      <div className="tunnel-title-row">
-                        <h2>{tunnel.name}</h2>
-                        {advancedMode && (
-                          <span className={`mode-badge ${tunnel.type}`}>
-                            {isDynamic
-                              ? "SOCKS5 动态代理"
-                              : isRemote
-                              ? "Remote 反向穿透"
-                              : "Local 本地转发"}
-                          </span>
-                        )}
-                        {advancedMode && tunnel.gateway_ports && (
-                          <span className="mode-badge gateway">局域网共享</span>
-                        )}
-                      </div>
+                      return (
+                        <article key={tunnel.id} className={`tunnel-card ${tunnel.type}`}>
+                          <div className="tunnel-head">
+                            <div>
+                              <div className="tunnel-title-row">
+                                <h2>{tunnel.name}</h2>
+                                {advancedMode && (
+                                  <span className={`mode-badge ${tunnel.type}`}>
+                                    {isDynamic
+                                      ? "SOCKS5 动态代理"
+                                      : isRemote
+                                      ? "Remote 反向穿透"
+                                      : "Local 本地转发"}
+                                  </span>
+                                )}
+                                {advancedMode && tunnel.gateway_ports && (
+                                  <span className="mode-badge gateway">局域网共享</span>
+                                )}
+                              </div>
 
-                      <div className="tunnel-route">
-                        {isDynamic ? (
-                          <div className="route-desc">
-                            <span>代理端口：</span>
-                            <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
-                            <span className="route-arrow">→</span>
-                            <span className="route-dest">
-                              <code>{host?.hostname ?? "远端服务器"}</code> 全网
+                              <div className="tunnel-route">
+                                {isDynamic ? (
+                                  <div className="route-desc">
+                                    <span>代理端口：</span>
+                                    <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                                    <span className="route-arrow">→</span>
+                                    <span className="route-dest">
+                                      <code>{host?.hostname ?? "远端服务器"}</code> 全网
+                                    </span>
+                                  </div>
+                                ) : isRemote ? (
+                                  <div className="route-desc">
+                                    <span>公网：</span>
+                                    <strong>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</strong>
+                                    <span className="route-arrow">→</span>
+                                    <span>本地：</span>
+                                    <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                                  </div>
+                                ) : (
+                                  <div className="route-desc">
+                                    <span>本地：</span>
+                                    <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+                                    <span className="route-arrow">→</span>
+                                    <span>远端：</span>
+                                    <strong>{tunnel.remote?.host}:{tunnel.remote?.port}</strong>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <span className={`status ${status.state}`}>
+                              {running
+                                ? "运行中"
+                                : status.state === "error"
+                                ? "异常"
+                                : "已停止"}
                             </span>
                           </div>
-                        ) : isRemote ? (
-                          <div className="route-desc">
-                            <span>公网：</span>
-                            <strong>{tunnel.remote?.host ?? "0.0.0.0"}:{tunnel.remote?.port}</strong>
-                            <span className="route-arrow">→</span>
-                            <span>本地：</span>
-                            <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
+
+                          {status.message && (
+                            <div className="error-box">
+                              <p className="error-text">{status.message}</p>
+                              <div className="error-actions">
+                                <button
+                                  type="button"
+                                  className="error-action-btn"
+                                  onClick={() => void showDiagnostics(tunnel.name)}
+                                >
+                                  📄 查看诊断日志
+                                </button>
+                                {host && (
+                                  <button
+                                    type="button"
+                                    className="error-action-btn"
+                                    onClick={() => openHost(host)}
+                                  >
+                                    ⚙️ 去修改服务器“{host.name}”的设置
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="actions">
+                            {isDynamic ? (
+                              <button
+                                disabled={!running}
+                                onClick={() => copyToClipboard(socksAddress, `socks-${tunnel.id}`)}
+                              >
+                                {copiedId === `socks-${tunnel.id}` ? "✓ 已复制" : "复制代理"}
+                              </button>
+                            ) : isRemote ? (
+                              <button
+                                disabled={!running}
+                                onClick={() =>
+                                  copyToClipboard(
+                                    `${host?.hostname ?? "服务器IP"}:${tunnel.remote?.port}`,
+                                    `remote-${tunnel.id}`
+                                  )
+                                }
+                              >
+                                {copiedId === `remote-${tunnel.id}` ? "✓ 已复制" : "复制公网"}
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  disabled={!running}
+                                  onClick={() =>
+                                    void action("open_tunnel_in_browser", {
+                                      name: tunnel.name,
+                                    })
+                                  }
+                                >
+                                  打开浏览器
+                                </button>
+                                <button
+                                  disabled={!running}
+                                  onClick={() => copyToClipboard(localAddress, `local-${tunnel.id}`)}
+                                >
+                                  {copiedId === `local-${tunnel.id}` ? "✓ 已复制" : "复制地址"}
+                                </button>
+                              </>
+                            )}
+
+                            <button
+                              className={running ? "btn-stop" : "btn-start"}
+                              onClick={() =>
+                                void action(running ? "stop_tunnel" : "start_tunnel", {
+                                  name: tunnel.name,
+                                })
+                              }
+                            >
+                              {running ? "停止" : "启动"}
+                            </button>
+                            <button onClick={() => openTunnel(tunnel)}>编辑</button>
+                            <button
+                              title="以该条目为模板创建新条目"
+                              onClick={() => duplicateTunnel(tunnel)}
+                            >
+                              创建副本
+                            </button>
+                            <button
+                              className="danger-link"
+                              onClick={() => void deleteTunnel(tunnel.name)}
+                            >
+                              删除
+                            </button>
                           </div>
-                        ) : (
-                          <div className="route-desc">
-                            <span>本地：</span>
-                            <strong>{tunnel.local.host}:{tunnel.local.port}</strong>
-                            <span className="route-arrow">→</span>
-                            <span>远端：</span>
-                            <strong>{tunnel.remote?.host}:{tunnel.remote?.port}</strong>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <span className={`status ${status.state}`}>
-                      {running
-                        ? "运行中"
-                        : status.state === "error"
-                        ? "异常"
-                        : "已停止"}
-                    </span>
-                  </div>
-
-                  {status.message && (
-                    <div className="error-box">
-                      <p className="error-text">{status.message}</p>
-                      {host && (
-                        <button
-                          type="button"
-                          className="error-action-btn"
-                          onClick={() => openHost(host)}
-                        >
-                          ⚙️ 去修改服务器“{host.name}”的设置
-                        </button>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="actions">
-                    {isDynamic ? (
-                      <button
-                        disabled={!running}
-                        onClick={() => copyToClipboard(socksAddress, `socks-${tunnel.id}`)}
-                      >
-                        {copiedId === `socks-${tunnel.id}` ? "✓ 已复制" : "复制代理"}
-                      </button>
-                    ) : isRemote ? (
-                      <button
-                        disabled={!running}
-                        onClick={() =>
-                          copyToClipboard(
-                            `${host?.hostname ?? "服务器IP"}:${tunnel.remote?.port}`,
-                            `remote-${tunnel.id}`
-                          )
-                        }
-                      >
-                        {copiedId === `remote-${tunnel.id}` ? "✓ 已复制" : "复制公网"}
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          disabled={!running}
-                          onClick={() =>
-                            void action("open_tunnel_in_browser", {
-                              name: tunnel.name,
-                            })
-                          }
-                        >
-                          打开浏览器
-                        </button>
-                        <button
-                          disabled={!running}
-                          onClick={() => copyToClipboard(localAddress, `local-${tunnel.id}`)}
-                        >
-                          {copiedId === `local-${tunnel.id}` ? "✓ 已复制" : "复制地址"}
-                        </button>
-                      </>
-                    )}
-
-                    <button
-                      className={running ? "btn-stop" : "btn-start"}
-                      onClick={() =>
-                        void action(running ? "stop_tunnel" : "start_tunnel", {
-                          name: tunnel.name,
-                        })
-                      }
-                    >
-                      {running ? "停止" : "启动"}
-                    </button>
-                    <button onClick={() => openTunnel(tunnel)}>编辑</button>
-                    <button
-                      className="danger-link"
-                      onClick={() => void deleteTunnel(tunnel.name)}
-                    >
-                      删除
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
+                        </article>
+                      );
+                    })}
+                </div>
+              </section>
+            ))}
           </div>
 
           {!tunnels.length && (
@@ -975,11 +1286,23 @@ export default function App() {
                   })
                 }
               >
-                <option value="password">密码 (推荐常规使用)</option>
                 <option value="private_key">私钥文件 (.pem / id_rsa / id_ed25519)</option>
                 <option value="ssh_agent">SSH Agent (系统后台密钥代理)</option>
+                {(supportsPasswordAuth || hostForm.authType === "password") && (
+                  <option value="password">
+                    {supportsPasswordAuth
+                      ? "密码 (由 Windows DPAPI 加密保存)"
+                      : "密码 (当前平台不支持)"}
+                  </option>
+                )}
               </select>
             </label>
+
+            {!supportsPasswordAuth && (
+              <small className="field-hint">
+                当前平台（{platform || "非 Windows"}）无法安全保存密码，请使用 SSH Agent 或私钥认证。
+              </small>
+            )}
 
             {hostForm.authType === "ssh_agent" && (
               <div className="auth-hint-card">
@@ -1237,6 +1560,15 @@ export default function App() {
               </div>
             </div>
 
+            {/* 端口冲突提示：同一台机器无法重复监听同一端口。静默冲突会让用户到"启动"时
+                才失败且不知原因——「创建副本」会原样复制端口，尤其容易撞上。 */}
+            {portConflict && (
+              <small className="field-hint field-hint-warn">
+                ⚠️ 本地端口 {tunnelForm.localHost}:{tunnelForm.localPort} 已被转发「
+                {portConflict.name}」占用，两者无法同时启动，请改用其它端口。
+              </small>
+            )}
+
             {/* 远端配置 */}
             {advancedMode && tunnelForm.kind === "dynamic" ? (
               <div className="auth-hint-card">
@@ -1412,6 +1744,35 @@ export default function App() {
               />
             </div>
 
+            <label>
+              主机密钥校验策略 (StrictHostKeyChecking)
+              <select
+                value={settingsForm.hostKeyPolicy}
+                onChange={(e) =>
+                  setSettingsForm({
+                    ...settingsForm,
+                    hostKeyPolicy: e.target.value as HostKeyPolicy,
+                  })
+                }
+              >
+                {(Object.keys(hostKeyPolicyLabels) as HostKeyPolicy[]).map((policy) => (
+                  <option key={policy} value={policy}>
+                    {hostKeyPolicyLabels[policy]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {settingsForm.hostKeyPolicy === "insecure" ? (
+              <p className="form-error" role="alert">
+                当前策略不校验主机密钥：无法察觉中间人攻击，服务器更换密钥时也不会拒绝连接。
+              </p>
+            ) : (
+              <small className="field-hint">
+                可信主机记录保存在应用私有文件：
+                {snapshot?.knownHostsPath ?? "（随配置文件同目录）"}
+              </small>
+            )}
+
             <div className="pair-checks" style={{ marginTop: "8px" }}>
               <label className="check">
                 <input
@@ -1425,20 +1786,6 @@ export default function App() {
                   }
                 />
                 启用系统 TCP 层保活 (TCPKeepAlive)
-              </label>
-
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={settingsForm.strictHostKeyChecking}
-                  onChange={(e) =>
-                    setSettingsForm({
-                      ...settingsForm,
-                      strictHostKeyChecking: e.target.checked,
-                    })
-                  }
-                />
-                严格主机密钥检查 (StrictHostKeyChecking=accept-new)
               </label>
 
               <label className="check">
@@ -1468,6 +1815,42 @@ export default function App() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {/* 诊断日志弹窗 */}
+      {diagnostics && (
+        <Modal
+          title={`📄 诊断日志：${diagnostics.tunnel}`}
+          close={() => setDiagnostics(null)}
+        >
+          <p className="field-hint">
+            下面是 OpenSSH 连接过程中的原始输出，用于定位认证失败、Host Key 不匹配与网络不可达等问题。
+          </p>
+          <textarea
+            className="diagnostics-output"
+            readOnly
+            rows={16}
+            value={loadingDiagnostics ? "正在读取诊断信息..." : diagnostics.text}
+          />
+          <div className="form-actions">
+            <button
+              type="button"
+              onClick={() =>
+                copyToClipboard(diagnostics.text, `diag-${diagnostics.tunnel}`)
+              }
+              disabled={loadingDiagnostics || !diagnostics.text}
+            >
+              {copiedId === `diag-${diagnostics.tunnel}` ? "✓ 已复制" : "复制全部"}
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => setDiagnostics(null)}
+            >
+              关闭
+            </button>
+          </div>
         </Modal>
       )}
 
@@ -1555,6 +1938,19 @@ function Field({
   );
 }
 
+/**
+ * 对话框内可聚焦元素的选择器，供 Tab 焦点陷阱使用。
+ * 对话框自身带 tabIndex={-1}，因此不会被 `[tabindex]` 分支命中。
+ */
+const focusableSelector = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
 function Modal({
   title,
   close,
@@ -1564,12 +1960,64 @@ function Modal({
   close: () => void;
   children: ReactNode;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+
+  // Esc 关闭：监听 document 而非对话框自身，这样即使焦点意外落到背景内容上也能生效。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [close]);
+
+  // 打开时把焦点移入对话框（聚焦容器本身而非首个可聚焦元素——本项目的对话框
+  // 首个可聚焦元素是右上角「关闭」按钮，聚焦它会让读屏用户先听到"关闭"而非标题），
+  // 关闭后把焦点归还给打开它的那个元素。
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
+    return () => {
+      if (previous && document.contains(previous)) previous.focus();
+    };
+  }, []);
+
+  // Tab 焦点陷阱：焦点在对话框内首尾循环，不逃逸到背景内容。
+  const trapFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const node = dialogRef.current;
+    if (!node) return;
+    const items = Array.from(node.querySelectorAll<HTMLElement>(focusableSelector));
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
     <div className="modal-bg">
-      <div className="modal">
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        ref={dialogRef}
+        tabIndex={-1}
+        onKeyDown={trapFocus}
+      >
         <header>
-          <h2>{title}</h2>
-          <button type="button" onClick={close}>
+          <h2 id={titleId}>{title}</h2>
+          <button type="button" aria-label="关闭" onClick={close}>
             ×
           </button>
         </header>

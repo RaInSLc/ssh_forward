@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SSH Forward Configuration V2",
+  "type": "object",
+  "required": ["version"],
+  "properties": {
+    "version": { "const": 2 },
+    "settings": {
+      "type": "object",
+      "description": "全部字段均可省略，省略时使用应用默认值。",
+      "properties": {
+        "host_key_policy": {
+          "type": "string",
+          "enum": ["accept_new", "strict", "insecure"],
+          "default": "accept_new",
+          "description": "accept_new：首次连接自动登记，密钥变更则拒绝；strict：未知主机直接拒绝；insecure：完全不校验（存在中间人风险）。"
+        },
+        "connect_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 10 },
+        "server_alive_interval_seconds": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 15 },
+        "server_alive_count_max": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 3 },
+        "tcp_keep_alive": { "type": "boolean", "default": true },
+        "compression": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
+    "hosts": { "type": "array", "items": { "$ref": "#/$defs/host" } },
+    "tunnels": { "type": "array", "items": { "$ref": "#/$defs/tunnel" } }
+  },
+  "$defs": {
+    "endpoint": {
+      "type": "object",
+      "required": ["host", "port"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      },
+      "additionalProperties": false
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ssh_agent", "private_key", "password"],
+          "default": "ssh_agent"
+        },
+        "private_key": { "type": "string", "description": "type 为 private_key 时必填。" },
+        "credential_id": { "type": "string", "description": "历史字段，仅用于兼容旧配置。" },
+        "encrypted_password": {
+          "type": "string",
+          "description": "type 为 password 时必填。Windows 上为 DPAPI 密文的 Base64 表示。"
+        }
+      },
+      "additionalProperties": false
+    },
+    "host": {
+      "type": "object",
+      "required": ["id", "name", "hostname", "username"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "hostname": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
+        "username": { "type": "string", "minLength": 1 },
+        "auth": { "$ref": "#/$defs/auth" },
+        "jump_host_id": { "type": "string", "description": "级联跳板机，指向另一台服务器的 id。" },
+        "proxy_command": { "type": "string" },
+        "identities_only": { "type": "boolean" },
+        "certificate_file": { "type": "string" },
+        "compression": { "type": "boolean" },
+        "custom_options": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "透传给 OpenSSH 的 -o 参数。与内置选项同名时会被内置值覆盖（OpenSSH 首个取值生效）。"
+        },
+        "enabled": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    },
+    "tunnel": {
+      "type": "object",
+      "required": ["id", "name", "host_id", "type", "local"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "host_id": { "type": "string", "minLength": 1 },
+        "type": {
+          "type": "string",
+          "enum": ["local", "dynamic", "remote"],
+          "description": "local：本地转发 -L；dynamic：SOCKS5 代理 -D；remote：远程反向转发 -R。"
+        },
+        "local": { "$ref": "#/$defs/endpoint" },
+        "remote": { "$ref": "#/$defs/endpoint", "description": "type 为 dynamic 时省略。" },
+        "gateway_ports": { "type": "boolean", "default": false },
+        "custom_options": { "type": "array", "items": { "type": "string" } },
+        "auto_start": { "type": "boolean", "default": false },
+        "auto_reconnect": { "type": "boolean", "default": true },
+        "auto_open_browser": { "type": "boolean", "default": false },
+        "enabled": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    }
+  }
+}

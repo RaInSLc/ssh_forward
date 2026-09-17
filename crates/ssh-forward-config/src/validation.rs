@@ -15,6 +15,8 @@ pub enum ConfigError {
     },
     #[error("cannot create configuration directory {path}: {source}")]
     CreateDirectory { path: PathBuf, source: io::Error },
+    #[error("cannot lock configuration {path}: {source}")]
+    Lock { path: PathBuf, source: io::Error },
     #[error("cannot write configuration {path}: {source}")]
     Write { path: PathBuf, source: io::Error },
     #[error("cannot replace configuration {temporary_path} with {path}: {source}")]
@@ -23,6 +25,10 @@ pub enum ConfigError {
         path: PathBuf,
         source: io::Error,
     },
+    #[error(
+        "configuration version {found} is newer than the supported version {supported}; please upgrade SSH Forward"
+    )]
+    UnsupportedVersion { found: u32, supported: u32 },
     #[error("configuration validation failed: {0}")]
     Validation(String),
 }

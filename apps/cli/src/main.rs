@@ -3,7 +3,10 @@ use std::{path::PathBuf, process::ExitCode};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use ssh_forward_config::{Endpoint, load, validate};
-use ssh_forward_core::{add_host, add_tunnel, remove_host, remove_tunnel, start_tunnel};
+use ssh_forward_core::{
+    AuthInput, HostDraft, StartOptions, TunnelDraft, remove_host, remove_tunnel, start_tunnel,
+    upsert_host, upsert_tunnel,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -136,13 +139,27 @@ fn run(cli: Cli) -> Result<()> {
         Command::Host {
             command: HostCommand::Add(arguments),
         } => {
-            let host = add_host(
+            let auth = match arguments.key {
+                Some(path) => AuthInput::PrivateKey { path },
+                None => AuthInput::SshAgent,
+            };
+            let host = upsert_host(
                 &cli.config,
-                arguments.name,
-                arguments.host,
-                arguments.port,
-                arguments.user,
-                arguments.key,
+                None,
+                HostDraft {
+                    name: arguments.name,
+                    hostname: arguments.host,
+                    port: arguments.port,
+                    username: arguments.user,
+                    auth,
+                    jump_host_id: None,
+                    proxy_command: None,
+                    identities_only: None,
+                    certificate_file: None,
+                    compression: None,
+                    custom_options: Vec::new(),
+                    enabled: true,
+                },
             )?;
             println!("Added host '{}' ({})", host.name, host.id);
         }
@@ -183,13 +200,19 @@ fn run(cli: Cli) -> Result<()> {
         Command::Tunnel {
             command: TunnelCommand::Add(arguments),
         } => {
-            let tunnel = add_tunnel(
+            let tunnel = upsert_tunnel(
                 &cli.config,
-                arguments.name,
-                &arguments.host,
-                arguments.local,
-                Some(arguments.remote),
-                false,
+                None,
+                TunnelDraft {
+                    name: arguments.name,
+                    host_name: arguments.host,
+                    kind: ssh_forward_config::TunnelType::Local,
+                    local: arguments.local,
+                    remote: Some(arguments.remote),
+                    gateway_ports: false,
+                    custom_options: Vec::new(),
+                    auto_open_browser: false,
+                },
             )?;
             println!("Added tunnel '{}' ({})", tunnel.name, tunnel.id);
         }
@@ -201,21 +224,24 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Start { tunnel } => {
             let config = load(&cli.config)?;
-            let forward = start_tunnel(&config, &tunnel)?;
+            let forward = start_tunnel(&config, &tunnel, StartOptions::default())?;
             println!(
                 "Tunnel '{tunnel}' started with OpenSSH process {}. Press Ctrl+C to stop.",
                 forward.id()
             );
-            wait_for_interrupt()?;
+            wait_for_interrupt();
             drop(forward);
         }
     }
     Ok(())
 }
 
-fn wait_for_interrupt() -> Result<()> {
+/// 阻塞当前线程，把生命周期交给 Ctrl+C。
+///
+/// 使用 `park` 而不是 sleep 轮询，避免空转占用 CPU。
+fn wait_for_interrupt() {
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::park();
     }
 }
 

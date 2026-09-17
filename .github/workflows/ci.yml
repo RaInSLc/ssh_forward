@@ -1,0 +1,110 @@
+name: CI
+
+# 在 push 与 PR 上执行 `AGENTS.md` 规定的五步自检，让破坏性提交在提交时即暴露，
+# 而不是等到打 Tag 发版时才由 release.yml 发现。
+#
+# 与 release.yml 的分工：
+#   - 本工作流：早期反馈。不打包、不发布，只跑检查。
+#   - release.yml：发版闸门。在 tag 上跑同样的检查 + 三平台打包 + 发布。
+# 两者刻意保留重复的检查步骤：CI 用于快速失败，release 用于保证发版产物可信。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的旧运行在新推送到来时取消，避免排队浪费额度。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # 轻量作业：不需要 Rust 工具链，秒级完成，因此独立于平台矩阵先跑。
+  version:
+    name: 版本号一致性
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check version consistency
+        run: node scripts/check-version.mjs
+
+  # 平台矩阵取产品实际支持的两个平台（与 release.yml 的打包矩阵一致）。
+  # 不纳入 Linux：产品不发布 Linux 产物，且 Tauri 在 Linux 上还需额外安装
+  # webkit2gtk / gtk 等系统依赖，性价比低。
+  # macOS 只取一个架构：本作业只做编译与测试，架构差异不影响检查结论。
+  verify:
+    name: 自检 (${{ matrix.os }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # 键包含 OS 与 Cargo.lock 哈希；restore-keys 允许在 lock 变化时
+          # 复用同平台的旧缓存，避免每次依赖更新都全量重建。
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      # ── 五步自检（AGENTS.md 规定）──────────────────────────────────────────
+      - name: 1/5 Rust formatting
+        run: cargo fmt --all -- --check
+
+      # 与 AGENTS.md 的规定及 release.yml 完全一致。
+      # 曾考虑加 --all-targets（连测试代码一起 lint，本机已验证通过），
+      # 但该形式无法在本机验证 macOS 行为，而 release.yml 已证明当前形式在多平台可通过，
+      # 故此处只执行项目既定规则，不引入额外假设。
+      - name: 2/5 Rust clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: 3/5 Rust tests
+        run: cargo test --workspace
+
+      - name: 4/5 Frontend type check and unit tests
+        working-directory: apps/desktop
+        run: |
+          npm run check
+          npm test
+
+      - name: 5/5 Frontend build
+        working-directory: apps/desktop
+        run: npm run build

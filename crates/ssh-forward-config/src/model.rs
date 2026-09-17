@@ -26,8 +26,8 @@ impl Default for Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    #[serde(default = "default_true")]
-    pub strict_host_key_checking: bool,
+    #[serde(default)]
+    pub host_key_policy: HostKeyPolicy,
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_seconds: u16,
     #[serde(default = "default_server_alive_interval")]
@@ -43,12 +43,42 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            strict_host_key_checking: true,
+            host_key_policy: HostKeyPolicy::default(),
             connect_timeout_seconds: default_connect_timeout(),
             server_alive_interval_seconds: default_server_alive_interval(),
             server_alive_count_max: default_server_alive_count_max(),
             tcp_keep_alive: true,
             compression: false,
+        }
+    }
+}
+
+/// Host Key 校验策略。
+///
+/// - `AcceptNew`（默认）：首次连接自动登记，之后密钥变更会被拒绝。
+/// - `Strict`：必须已存在可信记录，未知主机直接拒绝（不自动登记）。
+/// - `Insecure`：完全不做校验，密钥变更也不会被拒绝；需用户显式确认风险。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKeyPolicy {
+    #[default]
+    AcceptNew,
+    Strict,
+    Insecure,
+}
+
+impl HostKeyPolicy {
+    /// 是否需要在连接前主动预登记 Host Key。
+    pub fn should_prefetch(self) -> bool {
+        matches!(self, Self::AcceptNew)
+    }
+
+    /// 传给 OpenSSH `StrictHostKeyChecking` 的取值。
+    pub fn openssh_value(self) -> &'static str {
+        match self {
+            Self::AcceptNew => "accept-new",
+            Self::Strict => "yes",
+            Self::Insecure => "no",
         }
     }
 }

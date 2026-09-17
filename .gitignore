@@ -1,6 +1,9 @@
 # Sensitive runtime configuration and SSH trust data
-config.json
-known_hosts
+# 注意：以下模式必须锚定到仓库根目录。若写成不带前导斜杠的 `config.json`，
+# 会连 `examples/config.json` 这类本应入库的模板文件一起忽略。
+/config.json
+/config.json.lock
+/known_hosts
 .tauri/
 *.key
 *.key.pub
@@ -17,6 +20,7 @@ apps/desktop/dist/
 # Local AI workspace records and helper code
 报告/ai_codes/
 报告/ai_docs/
+.workbuddy-ai/
 
 .opencode/
 AGENTS.md

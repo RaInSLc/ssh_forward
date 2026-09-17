@@ -70,6 +70,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm run check
+          npm test
           npm run build
 
       - name: Build desktop bundles
