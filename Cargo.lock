@@ -3532,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-forward"
-version = "0.1.18"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "clap",
@@ -3543,7 +3543,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-forward-config"
-version = "0.1.18"
+version = "0.1.21"
 dependencies = [
  "serde",
  "serde_json",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-forward-core"
-version = "0.1.18"
+version = "0.1.21"
 dependencies = [
  "ssh-forward-config",
  "ssh-forward-ssh",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-forward-desktop"
-version = "0.1.18"
+version = "0.1.21"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-forward-ssh"
-version = "0.1.18"
+version = "0.1.21"
 dependencies = [
  "ssh-forward-config",
  "thiserror 2.0.20",

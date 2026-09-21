@@ -1,3 +1,5 @@
+mod runtime;
+
 use std::path::Path;
 
 use ssh_forward_config::{
@@ -6,6 +8,10 @@ use ssh_forward_config::{
 use ssh_forward_ssh::{ForwardSpec, OpenSshForward, SshError};
 use thiserror::Error;
 use uuid::Uuid;
+
+pub use runtime::{
+    RuntimePaths, app_data_dir, known_hosts_path, sanitize_file_stem, tunnel_log_path,
+};
 
 #[derive(Debug, Error)]
 pub enum CoreError {

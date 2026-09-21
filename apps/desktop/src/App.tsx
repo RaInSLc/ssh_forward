@@ -15,7 +15,16 @@ type Host = {
   hostname: string;
   port: number;
   username: string;
-  auth: { type: AuthType; private_key?: string };
+  /**
+   * 与 `ssh-forward-config` 的 `Auth` 对齐。后两个字段由桌面壳层在保存密码时写入，
+   * 界面不读它们，但类型必须如实描述线格式，否则新增读取方会拿到「不存在」的错觉。
+   */
+  auth: {
+    type: AuthType;
+    private_key?: string;
+    credential_id?: string;
+    encrypted_password?: string;
+  };
   jump_host_id?: string;
   proxy_command?: string;
   identities_only?: boolean;
@@ -36,6 +45,9 @@ type Tunnel = {
   remote?: Endpoint;
   gateway_ports?: boolean;
   custom_options?: string[];
+  /** 与 Rust `Tunnel` 的 `auto_start` / `auto_reconnect` 对齐（两者目前均无实现，见 D1）。 */
+  auto_start: boolean;
+  auto_reconnect: boolean;
   auto_open_browser: boolean;
   enabled: boolean;
 };
@@ -152,6 +164,21 @@ const newSettings = (): SettingsForm => ({
   serverAliveCountMax: 3,
   tcpKeepAlive: true,
   compression: false,
+});
+
+/**
+ * 后端 settings 快照 → 设置表单值。
+ *
+ * 抽成模块级纯函数，使「快照映射」与「何时允许覆盖表单」两件事解耦：
+ * 前者可独立验证，后者由 `settingsDirty` 单一控制。
+ */
+const settingsFromSnapshot = (settings: Settings): SettingsForm => ({
+  hostKeyPolicy: settings.host_key_policy ?? "accept_new",
+  connectTimeoutSeconds: settings.connect_timeout_seconds ?? 10,
+  serverAliveIntervalSeconds: settings.server_alive_interval_seconds ?? 15,
+  serverAliveCountMax: settings.server_alive_count_max ?? 3,
+  tcpKeepAlive: settings.tcp_keep_alive ?? true,
+  compression: settings.compression ?? false,
 });
 
 const hostKeyPolicyLabels: Record<HostKeyPolicy, string> = {
@@ -318,29 +345,76 @@ export default function App() {
     }
   };
 
+  /**
+   * 用户是否在设置面板中留下了未保存的编辑。
+   *
+   * 刻意只用 ref 作判据：轮询由 `setInterval` 驱动且依赖数组为空，
+   * 闭包内的 state 会永远停留在初值，无法用来判断「此刻面板是否打开」。
+   */
+  const settingsDirty = useRef(false);
+
+  /** 设置表单的唯一写入口：写入即视为「用户已编辑」，此后轮询不得覆盖。 */
+  const updateSettingsForm = (patch: Partial<SettingsForm>) => {
+    settingsDirty.current = true;
+    setSettingsForm((current) => ({ ...current, ...patch }));
+  };
+
+  /**
+   * 最近一次发出的 `get_snapshot` 请求序号。
+   *
+   * `loadData` 既被 `setInterval` 触发（不 await），也被每次操作后的 `action()` await，
+   * 因此两次调用可以重叠。没有序号时，先发出的慢响应可能后到达，
+   * 用较旧的数据覆盖较新的数据（例如刚创建完主机，界面却短暂回退到创建前的列表）。
+   */
+  const snapshotRequestId = useRef(0);
+
   const loadData = async () => {
+    const requestId = ++snapshotRequestId.current;
     try {
       const res = await invoke<Snapshot>("get_snapshot");
+      // 已有更新的请求发出，说明本次响应已过期，直接丢弃，不得写回任何状态。
+      if (requestId !== snapshotRequestId.current) {
+        return;
+      }
       setSnapshot(res);
-      if (res.config?.settings) {
-        setSettingsForm({
-          hostKeyPolicy: res.config.settings.host_key_policy ?? "accept_new",
-          connectTimeoutSeconds: res.config.settings.connect_timeout_seconds ?? 10,
-          serverAliveIntervalSeconds: res.config.settings.server_alive_interval_seconds ?? 15,
-          serverAliveCountMax: res.config.settings.server_alive_count_max ?? 3,
-          tcpKeepAlive: res.config.settings.tcp_keep_alive ?? true,
-          compression: res.config.settings.compression ?? false,
-        });
+      // 用户正在编辑设置时不得用后端值覆盖表单，否则未保存的输入会被静默还原（B2）。
+      if (res.config?.settings && !settingsDirty.current) {
+        setSettingsForm(settingsFromSnapshot(res.config.settings));
       }
     } catch (error) {
-      setNotice(String(error));
+      // 过期请求的失败同样不应打断界面：它对应的数据已被更新的请求取代。
+      if (requestId === snapshotRequestId.current) {
+        setNotice(String(error));
+      }
     }
   };
 
   useEffect(() => {
     void loadData();
-    const timer = window.setInterval(() => void loadData(), 1500);
-    return () => window.clearInterval(timer);
+
+    // 窗口不可见时（最小化 / 切到其它应用）周期性刷新毫无意义：用户看不到结果，
+    // 后端却仍要每 1.5 秒读一次配置、逐条探测隧道进程（每小时约 2400 次）。
+    // 这里只抑制「不可见时的周期触发」，不影响操作后主动发起的 loadData。
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      void loadData();
+    }, 1500);
+
+    // 重新可见时立刻补一次，否则要等下一个 tick 才能看到最新状态。
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void loadData();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -717,6 +791,11 @@ export default function App() {
 
   const openSettings = () => {
     setFormError("");
+    // 每次打开都从后端最新值重新开始，并清除上一次可能残留的编辑态。
+    settingsDirty.current = false;
+    if (snapshot?.config?.settings) {
+      setSettingsForm(settingsFromSnapshot(snapshot.config.settings));
+    }
     setPanel("settings");
   };
 
@@ -1052,6 +1131,7 @@ export default function App() {
                     type="button"
                     className="tunnel-group-toggle"
                     aria-expanded={!isGroupCollapsed(group.key)}
+                    aria-controls={`tunnel-group-cards-${group.key}`}
                     onClick={() => toggleGroupCollapsed(group.key)}
                   >
                     <span className="tunnel-group-caret">
@@ -1065,7 +1145,11 @@ export default function App() {
                     </span>
                   </button>
                 )}
-                <div className="tunnel-group-cards">
+                <div
+                  id={`tunnel-group-cards-${group.key}`}
+                  className="tunnel-group-cards"
+                  hidden={isGroupCollapsed(group.key)}
+                >
                   {!isGroupCollapsed(group.key) &&
                     group.tunnels.map((tunnel) => {
                       const status = statuses[tunnel.name] ?? {
@@ -1708,8 +1792,7 @@ export default function App() {
                 type="number"
                 value={settingsForm.serverAliveIntervalSeconds}
                 set={(value) =>
-                  setSettingsForm({
-                    ...settingsForm,
+                  updateSettingsForm({
                     serverAliveIntervalSeconds: Number(value),
                   })
                 }
@@ -1719,8 +1802,7 @@ export default function App() {
                 type="number"
                 value={settingsForm.serverAliveCountMax}
                 set={(value) =>
-                  setSettingsForm({
-                    ...settingsForm,
+                  updateSettingsForm({
                     serverAliveCountMax: Number(value),
                   })
                 }
@@ -1736,8 +1818,7 @@ export default function App() {
                 type="number"
                 value={settingsForm.connectTimeoutSeconds}
                 set={(value) =>
-                  setSettingsForm({
-                    ...settingsForm,
+                  updateSettingsForm({
                     connectTimeoutSeconds: Number(value),
                   })
                 }
@@ -1749,8 +1830,7 @@ export default function App() {
               <select
                 value={settingsForm.hostKeyPolicy}
                 onChange={(e) =>
-                  setSettingsForm({
-                    ...settingsForm,
+                  updateSettingsForm({
                     hostKeyPolicy: e.target.value as HostKeyPolicy,
                   })
                 }
@@ -1779,8 +1859,7 @@ export default function App() {
                   type="checkbox"
                   checked={settingsForm.tcpKeepAlive}
                   onChange={(e) =>
-                    setSettingsForm({
-                      ...settingsForm,
+                    updateSettingsForm({
                       tcpKeepAlive: e.target.checked,
                     })
                   }
@@ -1793,8 +1872,7 @@ export default function App() {
                   type="checkbox"
                   checked={settingsForm.compression}
                   onChange={(e) =>
-                    setSettingsForm({
-                      ...settingsForm,
+                    updateSettingsForm({
                       compression: e.target.checked,
                     })
                   }

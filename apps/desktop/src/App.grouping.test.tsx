@@ -180,6 +180,9 @@ describe("按服务器分组", () => {
     fireEvent.click(toggle);
 
     expect(groupToggle("prod-a").getAttribute("aria-expanded")).toBe("false");
+    const collapsedPanel = cardView().querySelectorAll<HTMLElement>(".tunnel-group-cards")[0];
+    expect(collapsedPanel.hidden).toBe(true);
+    expect(groupToggle("prod-a").getAttribute("aria-controls")).toBe(collapsedPanel.id);
     expect(within(cardView()).queryByRole("heading", { name: "web-a", level: 2 })).toBe(null);
     expect(within(cardView()).queryByRole("heading", { name: "db-a", level: 2 })).toBe(null);
     // 只折叠本组：另一组不受影响。

@@ -14,6 +14,22 @@ use thiserror::Error;
 /// 每个 Tunnel 保留的 OpenSSH stderr 行数上限。
 const STDERR_TAIL_LIMIT: usize = 200;
 
+/// 单个隧道诊断日志文件的尺寸上限（2 MiB）。超过后触发一次轮转。
+const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 轮转后旧日志的文件名后缀（`tunnel-<id>.log` → `tunnel-<id>.log.1`）。
+///
+/// 只保留一份旧文件，因此单隧道的日志磁盘占用上界为 `2 * LOG_MAX_BYTES`。
+const LOG_ROTATED_SUFFIX: &str = "1";
+
+/// 轮转后的日志路径。清理端（删除隧道）也用它，避免两侧后缀不一致。
+pub fn rotated_log_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(LOG_ROTATED_SUFFIX);
+    PathBuf::from(name)
+}
+
 #[derive(Debug, Error)]
 pub enum SshError {
     #[error("local address {address} is already in use or cannot be bound: {source}")]
@@ -180,11 +196,92 @@ pub fn openssh_arguments(spec: &ForwardSpec<'_>) -> Vec<String> {
     arguments
 }
 
+/// 落盘日志的写入端。
+///
+/// 存在的意义是把「日志不会无限增长」这一约束放在写入路径上：原先直接
+/// `writeln!(log, ..)` 没有任何容量控制，长时间运行的隧道（反复重连、
+/// keepalive 超时刷屏）会让文件持续膨胀。
+struct LogSink {
+    file: std::fs::File,
+    path: PathBuf,
+    /// 已写入的字节数。以**文件现有大小**初始化，因此进程重启后仍然准确。
+    bytes: u64,
+    /// 触发轮转的阈值。做成字段而非直接读常量，是为了让测试能用小文件验证轮转。
+    limit: u64,
+}
+
+impl LogSink {
+    fn open(path: &Path) -> Option<Self> {
+        Self::open_with_limit(path, LOG_MAX_BYTES)
+    }
+
+    fn open_with_limit(path: &Path, limit: u64) -> Option<Self> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
+        // 用现有文件大小初始化计数，否则进程重启后计数归零，已超限的文件会继续增长。
+        let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        Some(Self {
+            file,
+            path: path.to_path_buf(),
+            bytes,
+            limit,
+        })
+    }
+
+    fn write_line(&mut self, line: &str) {
+        let incoming = line.len() as u64 + 1; // +1 为换行符
+        // **先**判断再写入：若等写完再判，触发轮转的那一行会落进 `.1`，
+        // 使两代文件都可能超出上限整整一行。提前预测则两代都严格不超上限。
+        //
+        // `self.bytes > 0` 这个条件用于兜住「单行本身就大于上限」的病态情况：
+        // 此时若轮转，会把一个空文件改名成 `.1` 并陷入「每次写入都轮转」的循环。
+        if self.bytes > 0 && self.bytes + incoming > self.limit {
+            self.rotate();
+        }
+        if writeln!(self.file, "{line}").is_ok() {
+            self.bytes = self.bytes.saturating_add(incoming);
+        }
+    }
+
+    /// 轮转：把当前文件改名为 `<name>.1`，再重新打开原路径。
+    ///
+    /// Windows 上 Rust 的 `File` 以 `FILE_SHARE_DELETE` 打开，因此对**已打开**的文件
+    /// 改名会成功，且原句柄会跟随改名后的文件——**所以必须重新打开原路径**，
+    /// 否则后续写入会继续落进 `.1`，新文件永远为空。
+    ///
+    /// 改名失败（例如被其他进程独占）时退化为截断：至少保证「不再增长」成立。
+    fn rotate(&mut self) {
+        let rotated = rotated_log_path(&self.path);
+        let _ = std::fs::remove_file(&rotated);
+        if std::fs::rename(&self.path, &rotated).is_ok() {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
+                self.file = file;
+            }
+        } else {
+            let _ = self.file.set_len(0);
+        }
+        self.bytes = 0;
+    }
+}
+
 /// 运行期诊断信息：保留 OpenSSH stderr 的尾部若干行，并可选落盘。
 #[derive(Default)]
 struct Diagnostics {
     tail: VecDeque<String>,
-    log: Option<std::fs::File>,
+    log: Option<LogSink>,
 }
 
 impl Diagnostics {
@@ -194,7 +291,7 @@ impl Diagnostics {
         }
         self.tail.push_back(line.to_owned());
         if let Some(log) = self.log.as_mut() {
-            let _ = writeln!(log, "{line}");
+            log.write_line(line);
         }
     }
 }
@@ -213,7 +310,7 @@ impl OpenSshForward {
 
         let diagnostics = Arc::new(Mutex::new(Diagnostics {
             tail: VecDeque::new(),
-            log: spec.log_path.and_then(open_log),
+            log: spec.log_path.and_then(LogSink::open),
         }));
         if let Ok(mut guard) = diagnostics.lock() {
             guard.record(&format!(
@@ -226,7 +323,7 @@ impl OpenSshForward {
             ));
         }
 
-        let askpass = spec.password.map(|_| create_askpass_script()).transpose()?;
+        let askpass = prepare_askpass(spec.password)?;
         let mut command = Command::new("ssh");
         command
             .args(openssh_arguments(spec))
@@ -318,20 +415,6 @@ impl Drop for OpenSshForward {
     }
 }
 
-fn open_log(path: &Path) -> Option<std::fs::File> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
-}
-
 fn spawn_stderr_reader(
     stderr: ChildStderr,
     diagnostics: Arc<Mutex<Diagnostics>>,
@@ -346,6 +429,36 @@ fn spawn_stderr_reader(
     })
 }
 
+/// 为密码认证准备 askpass 脚本；无密码时返回 `None`。
+///
+/// 只有 Windows 需要它：OpenSSH for Windows 通过 `cmd` 执行 `SSH_ASKPASS`，
+/// 因此必须写一个 `.cmd`。POSIX 平台本身也支持 `SSH_ASKPASS`，但本项目的
+/// 密码认证目前只在 Windows 上开放（`snapshot.supports_password_auth = cfg!(windows)`），
+/// 所以那里不生成任何脚本。
+#[cfg(windows)]
+fn prepare_askpass(password: Option<&str>) -> Result<Option<PathBuf>, SshError> {
+    password.map(|_| create_askpass_script()).transpose()
+}
+
+/// 非 Windows 平台显式拒绝密码认证。
+///
+/// 此前的实现会无条件写一个 `@echo off` + `powershell.exe` 的 `.cmd`，
+/// 而 POSIX 的 ssh 根本无法执行它——那是一条**静默失败**的路径：
+/// 脚本被创建、ssh 拿不到密码、用户只看到一句含义不明的连接失败。
+/// 直接返回错误比留下一个跑不通的脚本更诚实，也与上层「非 Windows 不支持密码认证」
+/// 的既有契约一致。
+#[cfg(not(windows))]
+fn prepare_askpass(password: Option<&str>) -> Result<Option<PathBuf>, SshError> {
+    match password {
+        None => Ok(None),
+        Some(_) => Err(SshError::Start(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "密码认证尚未在非 Windows 平台实现",
+        ))),
+    }
+}
+
+#[cfg(windows)]
 fn create_askpass_script() -> Result<PathBuf, SshError> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -364,6 +477,15 @@ fn create_askpass_script() -> Result<PathBuf, SshError> {
 mod tests {
     use super::*;
     use ssh_forward_config::{Auth, Endpoint, HostKeyPolicy, TunnelType};
+
+    /// 每个用例独占的临时目录，避免用例之间通过文件系统互相干扰。
+    fn log_test_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ssh-forward-log-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+        dir
+    }
 
     fn spec<'a>(
         settings: &'a Settings,
@@ -730,6 +852,155 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("alice@example.test"));
         // 第一条必须是 -N（不执行远程命令，纯转发）。
         assert_eq!(args.first().map(String::as_str), Some("-N"));
+    }
+
+    /// 轮转路径是原路径追加 `.1`。写入端与清理端必须用同一函数，否则删除隧道时会漏删。
+    #[test]
+    fn rotated_log_path_appends_numeric_suffix() {
+        let dir = log_test_dir("rotated-path");
+        let path = dir.join("tunnel-abc.log");
+
+        assert_eq!(rotated_log_path(&path), dir.join("tunnel-abc.log.1"));
+    }
+
+    /// 超过上限即轮转：旧内容整体滚入 `.1`，当前文件从空开始。
+    #[test]
+    fn log_sink_rotates_when_limit_is_exceeded() {
+        let dir = log_test_dir("rotate");
+        let path = dir.join("tunnel.log");
+        let limit = 200;
+        let mut sink = LogSink::open_with_limit(&path, limit).expect("打开日志失败");
+
+        for index in 0..40 {
+            sink.write_line(&format!("line-{index:03}"));
+        }
+
+        assert!(rotated_log_path(&path).exists(), "超过上限后应产生 .1 文件");
+        let live = std::fs::read_to_string(&path).expect("读取当前日志失败");
+        assert!(live.len() as u64 <= limit, "当前文件应不超过上限");
+        assert!(!live.contains("line-000"), "旧内容应已滚入 .1");
+        assert!(live.contains("line-039"), "最新一行必须落在当前文件里");
+    }
+
+    /// 轮转后新写入的内容必须落在**当前**文件，而不是跟随句柄进入 `.1`。
+    ///
+    /// Windows 上对**已打开**的文件改名会成功，且原句柄跟随改名后的文件，
+    /// 所以轮转必须显式重新打开原路径——这条用例锁住的正是这一点。
+    #[test]
+    fn log_sink_writes_to_the_live_file_after_rotation() {
+        let dir = log_test_dir("rotate-live");
+        let path = dir.join("tunnel.log");
+        let mut sink = LogSink::open_with_limit(&path, 100).expect("打开日志失败");
+
+        sink.write_line("before-rotation");
+        for index in 0..12 {
+            sink.write_line(&format!("padding-{index:03}"));
+        }
+        sink.write_line("after-rotation");
+
+        let live = std::fs::read_to_string(&path).expect("读取当前日志失败");
+        let rotated = std::fs::read_to_string(rotated_log_path(&path)).expect("读取 .1 失败");
+        assert!(
+            live.contains("after-rotation"),
+            "轮转后写入的内容必须在新文件里"
+        );
+        assert!(
+            !rotated.contains("after-rotation"),
+            "轮转后写入的内容不得落进 .1"
+        );
+        assert!(
+            rotated.contains("before-rotation"),
+            "轮转前的内容应保留在 .1"
+        );
+    }
+
+    /// 反复写入时磁盘占用上界为两代文件，不会无限增长。
+    #[test]
+    fn log_sink_bounds_disk_usage_to_two_generations() {
+        let dir = log_test_dir("bound");
+        let path = dir.join("tunnel.log");
+        let limit = 1024;
+        let mut sink = LogSink::open_with_limit(&path, limit).expect("打开日志失败");
+
+        let line = "x".repeat(63);
+        for _ in 0..200 {
+            sink.write_line(&line);
+        }
+
+        let live = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let rotated = std::fs::metadata(rotated_log_path(&path))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        assert!(live <= limit, "当前文件应不超过上限，实际 {live}");
+        assert!(rotated <= limit, ".1 文件应不超过上限，实际 {rotated}");
+        assert!(
+            live + rotated <= 2 * limit,
+            "两代合计应不超过 2 倍上限，实际 {}",
+            live + rotated
+        );
+    }
+
+    /// 打开已存在的日志时以**现有文件大小**初始化计数。
+    ///
+    /// 若计数从 0 开始，进程重启后已超限的文件会继续增长到再次超限为止，
+    /// 使「上界」这一保证失效。
+    #[test]
+    fn log_sink_initialises_byte_count_from_existing_file() {
+        let dir = log_test_dir("restart");
+        let path = dir.join("tunnel.log");
+        std::fs::write(&path, "x".repeat(300)).expect("写入初始日志失败");
+
+        let mut sink = LogSink::open_with_limit(&path, 256).expect("打开日志失败");
+        // 现有内容已超过上限，因此第一次写入后应立即轮转。
+        sink.write_line("first-after-restart");
+
+        let rotated = std::fs::read_to_string(rotated_log_path(&path)).expect("读取 .1 失败");
+        let live = std::fs::read_to_string(&path).expect("读取当前日志失败");
+        assert_eq!(rotated.len(), 300, "旧内容应整体滚入 .1");
+        assert_eq!(live, "first-after-restart\n", "新文件只含重启后的写入");
+    }
+
+    /// askpass 脚本只在 Windows 生成；非 Windows 必须**显式拒绝**密码认证。
+    ///
+    /// 负向意义：此前 `create_askpass_script` 无 `#[cfg]` 隔离，在 macOS/Linux 上会写出一个
+    /// `@echo off` + `powershell.exe` 的 `.cmd`，而那里的 ssh 根本执行不了它——
+    /// 脚本被创建、ssh 拿不到密码、用户只看到一句含义不明的连接失败。
+    /// 本用例断言这种「静默失败」不再存在：要么给出可用脚本，要么给出明确错误。
+    #[test]
+    fn askpass_is_prepared_only_on_windows() {
+        assert!(
+            prepare_askpass(None).expect("无密码时不应失败").is_none(),
+            "无密码时不应生成任何脚本"
+        );
+
+        let prepared = prepare_askpass(Some("s3cret"));
+
+        #[cfg(windows)]
+        {
+            let path = prepared
+                .expect("Windows 上应成功生成脚本")
+                .expect("应有脚本路径");
+            let body = std::fs::read_to_string(&path).expect("读取 askpass 脚本失败");
+            assert!(
+                body.contains("SSH_FORWARD_PASSWORD"),
+                "脚本必须把密码环境变量回显给 ssh，实际内容：{body:?}"
+            );
+            assert_eq!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("cmd"),
+                "Windows 的 SSH_ASKPASS 由 cmd 执行，扩展名必须是 .cmd"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let error = prepared.expect_err("非 Windows 平台必须拒绝密码认证");
+            assert!(
+                error.to_string().contains("非 Windows"),
+                "错误信息应说明原因，实际：{error}"
+            );
+        }
     }
 }
 

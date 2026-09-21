@@ -16,16 +16,19 @@ use ssh_forward_config::{
 use ssh_forward_core::{
     AuthInput,
     HostDraft,
-    StartOptions,
+    RuntimePaths,
     TunnelDraft,
+    // 运行期路径统一由 core 推导：壳层各自实现过一次，CLI 因此漏传而污染 ~/.ssh/known_hosts。
+    known_hosts_path,
     remove_host,
     remove_tunnel,
     // 与下方 #[tauri::command] fn start_tunnel 同名，必须重命名导入，否则报 E0255。
     start_tunnel as start_tunnel_core,
+    tunnel_log_path,
     upsert_host,
     upsert_tunnel,
 };
-use ssh_forward_ssh::OpenSshForward;
+use ssh_forward_ssh::{OpenSshForward, rotated_log_path};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager, State};
@@ -35,10 +38,28 @@ use windows_sys::Win32::{
     Security::Cryptography::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
     },
+    UI::Shell::ShellExecuteW,
+    UI::WindowsAndMessaging::SW_SHOWNORMAL,
 };
 
 /// 诊断信息回传给界面时保留的最大行数。
 const DIAGNOSTIC_LINE_LIMIT: usize = 200;
+
+/// 读取诊断日志时从文件尾部读取的初始字节窗口。
+///
+/// 需足够覆盖 [`DIAGNOSTIC_LINE_LIMIT`] 行（200 行 × 约 320 B ≈ 64 KB）。
+/// 行数不足时会按 [`LOG_TAIL_WINDOW_GROWTH`] 倍扩张，因此这里只是「一次命中」的常见值。
+const LOG_TAIL_READ_BYTES: u64 = 64 * 1024;
+
+/// 尾部窗口行数不足时的扩张倍数。
+const LOG_TAIL_WINDOW_GROWTH: u64 = 4;
+
+/// 允许交给系统默认浏览器打开的 URL scheme 白名单。
+///
+/// 本模块自己构造的 URL 固定用 `http`，此白名单是**防御性**的：它把
+/// 「不得打开任意 scheme」这一不变量写成可测试的断言，避免后续改动
+/// （例如 D5 放宽绑定地址、或允许用户传入 URL）静默引入 `file:` / `javascript:` 等入口。
+const BROWSER_URL_SCHEMES: [&str; 2] = ["http", "https"];
 
 struct AppState {
     config_path: Mutex<PathBuf>,
@@ -139,45 +160,10 @@ fn default_config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法定位应用配置目录：{error}"))
 }
 
-/// 应用私有数据目录（与 config.json 同级）。
-fn app_data_dir(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// 应用私有 known_hosts。
-///
-/// 刻意不使用 `~/.ssh/known_hosts`：应用不应替用户决定系统级的信任记录。
-fn app_known_hosts_path(config_path: &Path) -> PathBuf {
-    app_data_dir(config_path).join("known_hosts")
-}
-
-fn tunnel_log_path(config_path: &Path, tunnel_name: &str) -> PathBuf {
-    app_data_dir(config_path)
-        .join("logs")
-        .join(format!("tunnel-{}.log", sanitize_file_stem(tunnel_name)))
-}
-
-fn sanitize_file_stem(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() || character == '-' || character == '_' {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "unnamed".into()
-    } else {
-        cleaned
-    }
-}
+// 应用私有数据目录、`known_hosts` 与隧道日志路径的推导已下沉到
+// `ssh_forward_core`（见 `runtime` 模块），此处只导入使用。
+// 原先桌面壳层与 CLI 各写一份，CLI 那份漏传给了 OpenSSH，导致它退回默认行为、
+// 把信任记录写进用户主目录的 `~/.ssh/known_hosts`。
 
 fn platform_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -257,16 +243,63 @@ fn local_browser_url(tunnel: &Tunnel) -> Result<String, String> {
     ))
 }
 
+/// 校验 URL 的 scheme 在白名单内。
+///
+/// 与「调用方自己拼 URL」这层约定不同，这是**可测试的显式断言**：即使将来 URL 的来源
+/// 变得更宽（用户输入、配置字段），也不会把任意 scheme 交给系统 shell。
+fn ensure_openable_url(url: &str) -> Result<(), String> {
+    let Some((scheme, _)) = url.split_once("://") else {
+        return Err("URL 缺少 scheme，已拒绝打开".into());
+    };
+    if !BROWSER_URL_SCHEMES
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+    {
+        return Err(format!("不支持用浏览器打开 {scheme} 链接"));
+    }
+    Ok(())
+}
+
+/// 用系统默认浏览器打开 URL。
+///
+/// 刻意**不用 `cmd /C start`**：`cmd.exe` 有自己的解析规则，Rust 的标准 argv 引号机制
+/// 对它不完全生效（`&`、`^`、`|` 不触发引号，会被 cmd 当作命令分隔符），
+/// 于是「URL 不可注入」这一安全性只能依赖调用点的 host 白名单。
+/// `ShellExecuteW` 直接把 URL 交给 shell 的「打开」动词，**不存在命令行解析层**。
+#[cfg(windows)]
+fn open_url_with_system(url: &str) -> Result<(), String> {
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let operation = wide("open");
+    let target = wide(url);
+    // SAFETY：两个宽字符串在本函数栈上存活到调用结束；其余参数按文档传空。
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+
+    // ShellExecuteW 的返回值**不是** GetLastError 错误码：<= 32 表示失败。
+    if result <= 32 {
+        return Err(format!(
+            "无法打开系统默认浏览器（ShellExecuteW 返回 {result}）"
+        ));
+    }
+    Ok(())
+}
+
 fn open_in_browser(tunnel: &Tunnel) -> Result<(), String> {
     let url = local_browser_url(tunnel)?;
+    ensure_openable_url(&url)?;
     #[cfg(windows)]
-    {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", &url]);
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        cmd.spawn()
-            .map_err(|error| format!("无法打开系统默认浏览器：{error}"))?;
-    }
+    open_url_with_system(&url)?;
     #[cfg(target_os = "macos")]
     Command::new("open")
         .arg(&url)
@@ -467,60 +500,136 @@ fn describe_exit(config: &Config, tunnel_name: &str, stderr_tail: &[String]) -> 
     format!("OpenSSH 已退出，原始输出：\n{recent}")
 }
 
+/// 从日志文件尾部读取最多 [`DIAGNOSTIC_LINE_LIMIT`] 行。
+///
+/// 刻意**不整文件读入**：诊断日志可达数 MB，而界面只需要最后若干行。
+/// 做法是从尾部取一个字节窗口，若行数不足则按 [`LOG_TAIL_WINDOW_GROWTH`] 倍扩张，
+/// 直到够行或已到达文件开头——这样既避免了整文件读入，又保持了
+/// 「返回最后 200 行」这一契约不变。
 fn read_log_tail(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(DIAGNOSTIC_LINE_LIMIT);
-    Some(lines[start..].join("\n"))
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut window = LOG_TAIL_READ_BYTES;
+
+    loop {
+        let start = len.saturating_sub(window);
+        let mut reader = std::io::BufReader::new(&file);
+        if start > 0 {
+            use std::io::{Seek, SeekFrom};
+            reader.seek(SeekFrom::Start(start)).ok()?;
+        }
+        let mut buffer = Vec::new();
+        {
+            use std::io::Read;
+            reader.read_to_end(&mut buffer).ok()?;
+        }
+
+        // 从中间截断时，首个片段既可能是半行，也可能落在多字节字符中间；
+        // 统一从第一个换行之后开始，两个问题一并解决。
+        let slice = if start > 0 {
+            match buffer.iter().position(|byte| *byte == b'\n') {
+                Some(index) => &buffer[index + 1..],
+                None => &buffer[..],
+            }
+        } else {
+            &buffer[..]
+        };
+
+        let content = String::from_utf8_lossy(slice);
+        let lines: Vec<&str> = content.lines().collect();
+        if start == 0 || lines.len() >= DIAGNOSTIC_LINE_LIMIT {
+            let begin = lines.len().saturating_sub(DIAGNOSTIC_LINE_LIMIT);
+            return Some(lines[begin..].join("\n"));
+        }
+        window = window.saturating_mul(LOG_TAIL_WINDOW_GROWTH);
+    }
+}
+
+/// 转发进程的最小探针接口。
+///
+/// `AppState.forwards` 持有具体类型 `OpenSshForward`，其构造需要真实启动一个 OpenSSH
+/// 子进程，因此命令层的状态回收逻辑在普通单元测试中无法构造。把「查询进程是否存活」
+/// 抽象成 trait 后，[`reconcile_forwards`] 可以用假实现覆盖，B1 的语义才能被测试锁住。
+trait ForwardProbe {
+    fn probe_running(&mut self) -> Result<bool, String>;
+    fn probe_stderr_tail(&self) -> Vec<String>;
+}
+
+impl ForwardProbe for OpenSshForward {
+    fn probe_running(&mut self) -> Result<bool, String> {
+        // 完全限定语法：避免与同名 trait 方法产生歧义。
+        <OpenSshForward>::is_running(self).map_err(|error| error.to_string())
+    }
+
+    fn probe_stderr_tail(&self) -> Vec<String> {
+        <OpenSshForward>::stderr_tail(self)
+    }
+}
+
+/// 探测全部转发进程，回收已退出的条目。
+///
+/// 返回「需要写回状态表的变更条目」而不是整张状态表：调用方只应用这些条目，
+/// 不得整体覆盖，否则会丢掉 `start_tunnel` 在探测期间写入的 `starting` / `running`。
+fn reconcile_forwards<F: ForwardProbe>(
+    forwards: &mut HashMap<String, F>,
+    config: &Config,
+) -> Vec<(String, TunnelStatus)> {
+    let mut updates = Vec::new();
+    for (name, forward) in forwards.iter_mut() {
+        let running = forward.probe_running();
+        let message = match running {
+            Ok(true) => continue,
+            Ok(false) => describe_exit(config, name, &forward.probe_stderr_tail()),
+            Err(error) => error,
+        };
+        updates.push((
+            name.clone(),
+            TunnelStatus {
+                state: "error".into(),
+                message: Some(message),
+            },
+        ));
+    }
+    for (name, _) in &updates {
+        forwards.remove(name);
+    }
+    updates
+}
+
+/// 把探测结果写回状态表。
+///
+/// 刻意只对变更条目做 `insert`，绝不整体赋值：`snapshot` 在克隆状态表与写回之间要读取
+/// 配置并探测进程，期间 `start_tunnel` 可能写入 `starting` / `running`；整体覆盖会把这些
+/// 写入抹掉，而运行中的隧道又不会被重新写回 `running`，于是前端永久回退为 `stopped`
+/// 且无法自愈。
+fn apply_status_updates(
+    store: &mut HashMap<String, TunnelStatus>,
+    updates: Vec<(String, TunnelStatus)>,
+) {
+    for (name, status) in updates {
+        store.insert(name, status);
+    }
 }
 
 fn snapshot(state: &AppState) -> Result<Snapshot, String> {
     let path = config_path(state)?;
     let config = load(&path).map_err(|error| error.to_string())?;
-    let mut statuses = state
-        .statuses
-        .lock()
-        .map_err(|_| "Tunnel 状态锁不可用")?
-        .clone();
-    let mut forwards = state.forwards.lock().map_err(|_| "Tunnel 运行时锁不可用")?;
-    let mut exited = Vec::new();
-    for (name, forward) in forwards.iter_mut() {
-        match forward.is_running() {
-            Ok(true) => {}
-            Ok(false) => {
-                exited.push(name.clone());
-                let message = describe_exit(&config, name, &forward.stderr_tail());
-                statuses.insert(
-                    name.clone(),
-                    TunnelStatus {
-                        state: "error".into(),
-                        message: Some(message),
-                    },
-                );
-            }
-            Err(error) => {
-                exited.push(name.clone());
-                statuses.insert(
-                    name.clone(),
-                    TunnelStatus {
-                        state: "error".into(),
-                        message: Some(error.to_string()),
-                    },
-                );
-            }
-        }
-    }
-    for name in exited {
-        forwards.remove(&name);
-    }
-    drop(forwards);
-    *state.statuses.lock().map_err(|_| "Tunnel 状态锁不可用")? = statuses.clone();
+    let updates = {
+        let mut forwards = state.forwards.lock().map_err(|_| "Tunnel 运行时锁不可用")?;
+        reconcile_forwards(&mut forwards, &config)
+    };
+    // 变更应用与响应克隆在同一临界区内完成，保证返回的状态表与实际存储一致。
+    let statuses = {
+        let mut store = state.statuses.lock().map_err(|_| "Tunnel 状态锁不可用")?;
+        apply_status_updates(&mut store, updates);
+        store.clone()
+    };
     Ok(Snapshot {
         path: path.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         platform: platform_name().into(),
         supports_password_auth: cfg!(windows),
-        known_hosts_path: app_known_hosts_path(&path).display().to_string(),
+        known_hosts_path: known_hosts_path(&path).display().to_string(),
         config,
         statuses,
     })
@@ -626,10 +735,34 @@ fn edit_tunnel(
         .map_err(|error| error.to_string())
 }
 
+/// 删除某条隧道的诊断日志（当前文件与轮转后的旧文件）。
+///
+/// 刻意**静默忽略失败**：日志属于诊断附属物，清理不成功不应让「删除隧道」这一
+/// 用户操作整体失败。同时只删除由 [`tunnel_log_path`] 推导出的两个路径，
+/// 不触碰配置目录中的其他内容。
+fn remove_tunnel_logs(config_path: &Path, tunnel_id: &str) {
+    let path = tunnel_log_path(config_path, tunnel_id);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(rotated_log_path(&path));
+}
+
 #[tauri::command]
 fn delete_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> {
     stop_tunnel(name.clone(), state.clone())?;
-    remove_tunnel(&config_path(&state)?, &name).map_err(|error| error.to_string())
+    let path = config_path(&state)?;
+    // 必须在 remove_tunnel 之前取 id：删除后配置里就查不到这条隧道，
+    // 而日志文件名由 id 决定（C3），届时无法再推导出日志路径。
+    let tunnel_id = load(&path)
+        .map_err(|error| error.to_string())?
+        .tunnels
+        .iter()
+        .find(|tunnel| tunnel.name == name)
+        .map(|tunnel| tunnel.id.clone());
+    remove_tunnel(&path, &name).map_err(|error| error.to_string())?;
+    if let Some(tunnel_id) = tunnel_id {
+        remove_tunnel_logs(&path, &tunnel_id);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -668,9 +801,10 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
             .find(|host| host.id == tunnel.host_id)
             .ok_or("未找到 Tunnel 对应的服务器")?;
 
-        let known_hosts = app_known_hosts_path(&path);
+        // 运行期路径统一由 core 推导，壳层只需补密码，结构上无法再遗漏。
+        let paths = RuntimePaths::for_tunnel(&path, &tunnel.id);
         if config.settings.host_key_policy.should_prefetch() {
-            prefetch_host_key(host, &known_hosts)?;
+            prefetch_host_key(host, paths.known_hosts())?;
         }
 
         let password = match host.auth.kind {
@@ -684,17 +818,8 @@ fn start_tunnel(name: String, state: State<'_, AppState>) -> Result<(), String> 
             _ => Ok(None),
         }?;
 
-        let log_path = tunnel_log_path(&path, &tunnel.name);
-        let forward = start_tunnel_core(
-            &config,
-            &name,
-            StartOptions {
-                password: password.as_deref(),
-                known_hosts: Some(&known_hosts),
-                log_path: Some(&log_path),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let forward = start_tunnel_core(&config, &name, paths.options(password.as_deref()))
+            .map_err(|error| error.to_string())?;
 
         state
             .forwards
@@ -746,9 +871,25 @@ fn get_tunnel_diagnostics(name: String, state: State<'_, AppState>) -> Result<St
         if !text.is_empty() {
             return Ok(text);
         }
+        // 内存无输出时，直接沿用该进程启动时真正写入的日志文件。
+        if let Some(log_path) = forward.log_path() {
+            return read_log_tail(log_path).ok_or_else(|| {
+                format!(
+                    "暂无诊断信息（日志文件 {} 不存在或为空）",
+                    log_path.display()
+                )
+            });
+        }
     }
 
-    let log_path = tunnel_log_path(&path, &name);
+    // 隧道未运行：按配置中的隧道 id 推导日志路径，与 start_tunnel 的命名保持一致。
+    let config = load(&path).map_err(|error| error.to_string())?;
+    let tunnel = config
+        .tunnels
+        .iter()
+        .find(|tunnel| tunnel.name == name)
+        .ok_or("未找到 Tunnel")?;
+    let log_path = tunnel_log_path(&path, &tunnel.id);
     read_log_tail(&log_path).ok_or_else(|| {
         format!(
             "暂无诊断信息（日志文件 {} 不存在或为空）",
@@ -859,4 +1000,487 @@ fn main() {
                 cleanup_forwards(&state);
             }
         });
+}
+
+/// 状态回收与日志命名的回归测试。
+///
+/// 这些用例之所以此前不可能存在，是因为探测逻辑直接依赖具体类型 `OpenSshForward`
+/// （构造它需要真实启动 OpenSSH 子进程）。抽出 [`ForwardProbe`] 后即可用假探针覆盖。
+#[cfg(test)]
+mod status_pipeline_tests {
+    use super::{
+        Config, ForwardProbe, TunnelStatus, apply_status_updates, reconcile_forwards,
+        tunnel_log_path,
+    };
+    // 桌面壳层只在测试里用到它，故不放进模块级导入（否则非测试构建会报未使用导入）。
+    use ssh_forward_core::sanitize_file_stem;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    /// 可控的假探针：无需 SSH 进程即可脚本化「存活 / 已退出 / 探测失败」三种结果。
+    struct FakeForward {
+        running: Result<bool, String>,
+        stderr: Vec<String>,
+    }
+
+    impl FakeForward {
+        fn alive() -> Self {
+            Self {
+                running: Ok(true),
+                stderr: Vec::new(),
+            }
+        }
+
+        fn exited(stderr: &[&str]) -> Self {
+            Self {
+                running: Ok(false),
+                stderr: stderr.iter().map(|line| (*line).to_string()).collect(),
+            }
+        }
+
+        fn probe_failed(message: &str) -> Self {
+            Self {
+                running: Err(message.to_string()),
+                stderr: Vec::new(),
+            }
+        }
+    }
+
+    impl ForwardProbe for FakeForward {
+        fn probe_running(&mut self) -> Result<bool, String> {
+            self.running.clone()
+        }
+
+        fn probe_stderr_tail(&self) -> Vec<String> {
+            self.stderr.clone()
+        }
+    }
+
+    fn status(state: &str) -> TunnelStatus {
+        TunnelStatus {
+            state: state.into(),
+            message: None,
+        }
+    }
+
+    fn state_of<'a>(store: &'a HashMap<String, TunnelStatus>, name: &str) -> Option<&'a str> {
+        store.get(name).map(|status| status.state.as_str())
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* B1：状态表只允许增量写回                                          */
+    /* ---------------------------------------------------------------- */
+
+    /// B1 回归：`snapshot` 克隆状态表之后、写回之前，`start_tunnel` 可能写入 `running`。
+    /// 若写回是整体赋值，该条目会被抹掉，而运行中的隧道又不会被重新写回，
+    /// 前端将永久显示 `stopped` 且无法自愈。
+    #[test]
+    fn apply_status_updates_preserves_entries_written_after_clone() {
+        let mut store = HashMap::new();
+        store.insert("live".to_string(), status("running"));
+
+        apply_status_updates(&mut store, vec![("dead".to_string(), status("error"))]);
+
+        assert_eq!(state_of(&store, "live"), Some("running"));
+        assert_eq!(state_of(&store, "dead"), Some("error"));
+        assert_eq!(store.len(), 2);
+    }
+
+    /// 无变更时必须原样保留状态表（旧实现在此处也会重写整张表）。
+    #[test]
+    fn apply_status_updates_with_no_changes_keeps_store_intact() {
+        let mut store = HashMap::new();
+        store.insert("live".to_string(), status("running"));
+
+        apply_status_updates(&mut store, Vec::new());
+
+        assert_eq!(state_of(&store, "live"), Some("running"));
+        assert_eq!(store.len(), 1);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* B1：探测语义                                                      */
+    /* ---------------------------------------------------------------- */
+
+    #[test]
+    fn reconcile_leaves_alive_tunnels_untouched() {
+        let mut forwards = HashMap::new();
+        forwards.insert("alive".to_string(), FakeForward::alive());
+
+        let updates = reconcile_forwards(&mut forwards, &Config::default());
+
+        assert!(updates.is_empty(), "运行中的隧道不应产生状态变更");
+        assert!(forwards.contains_key("alive"), "运行中的隧道不应被回收");
+    }
+
+    #[test]
+    fn reconcile_marks_exited_tunnel_as_error_and_reclaims_it() {
+        let mut forwards = HashMap::new();
+        forwards.insert(
+            "dead".to_string(),
+            FakeForward::exited(&["Permission denied (publickey)."]),
+        );
+
+        let updates = reconcile_forwards(&mut forwards, &Config::default());
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, "dead");
+        assert_eq!(updates[0].1.state, "error");
+        assert!(
+            updates[0]
+                .1
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Permission denied")),
+            "应优先展示 OpenSSH 的真实输出"
+        );
+        assert!(!forwards.contains_key("dead"), "已退出的隧道应被回收");
+    }
+
+    /// 无 stderr 时退回按认证类型的排查提示，而不是空消息。
+    #[test]
+    fn reconcile_falls_back_to_auth_hint_when_stderr_is_empty() {
+        let mut forwards = HashMap::new();
+        forwards.insert("dead".to_string(), FakeForward::exited(&[]));
+
+        let updates = reconcile_forwards(&mut forwards, &Config::default());
+
+        assert_eq!(updates[0].1.state, "error");
+        assert!(
+            updates[0]
+                .1
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("OpenSSH 进程已退出"))
+        );
+    }
+
+    /// 探针自身报错同样要标记为 `error` 并回收，避免僵尸条目长期占用 `forwards`。
+    #[test]
+    fn reconcile_reports_probe_failure_and_reclaims_tunnel() {
+        let mut forwards = HashMap::new();
+        forwards.insert(
+            "broken".to_string(),
+            FakeForward::probe_failed("进程状态不可读"),
+        );
+
+        let updates = reconcile_forwards(&mut forwards, &Config::default());
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].1.message.as_deref(), Some("进程状态不可读"));
+        assert!(!forwards.contains_key("broken"));
+    }
+
+    /// 混合场景：只有真正发生变化的条目进入 updates，存活条目必须原样保留。
+    #[test]
+    fn reconcile_only_reports_entries_that_changed() {
+        let mut forwards = HashMap::new();
+        forwards.insert("alive-a".to_string(), FakeForward::alive());
+        forwards.insert("alive-b".to_string(), FakeForward::alive());
+        forwards.insert(
+            "dead".to_string(),
+            FakeForward::exited(&["Connection refused"]),
+        );
+
+        let updates = reconcile_forwards(&mut forwards, &Config::default());
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, "dead");
+        assert_eq!(forwards.len(), 2);
+        assert!(forwards.contains_key("alive-a"));
+        assert!(forwards.contains_key("alive-b"));
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* C3：日志文件名以隧道 id 为准，而不是隧道名                        */
+    /* ---------------------------------------------------------------- */
+
+    /// 归一化确实会把不同隧道名折叠成同一个文件名——这正是 C3 要消除的碰撞来源。
+    #[test]
+    fn sanitize_collapses_distinct_tunnel_names() {
+        assert_eq!(sanitize_file_stem("web api"), sanitize_file_stem("web:api"));
+        assert_eq!(sanitize_file_stem("web:api"), sanitize_file_stem("web_api"));
+        assert_eq!(sanitize_file_stem(""), "unnamed");
+    }
+
+    /// 改用 id 后，即使隧道名归一化后完全一致，日志路径也不会碰撞。
+    #[test]
+    fn tunnel_log_path_uses_id_so_names_cannot_collide() {
+        let config_path = Path::new("C:/app/config.json");
+        let first = tunnel_log_path(config_path, "11111111-1111-1111-1111-111111111111");
+        let second = tunnel_log_path(config_path, "22222222-2222-2222-2222-222222222222");
+
+        assert_ne!(first, second, "不同 id 必须得到不同日志文件");
+        assert!(
+            first
+                .to_string_lossy()
+                .ends_with("tunnel-11111111-1111-1111-1111-111111111111.log"),
+            "id 只含十六进制字符与连字符，归一化不应改写它：{}",
+            first.display()
+        );
+        assert!(
+            first
+                .parent()
+                .is_some_and(|parent| parent.ends_with("logs")),
+            "日志仍应落在配置目录下的 logs 子目录：{}",
+            first.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_lifecycle_tests {
+    use super::{
+        DIAGNOSTIC_LINE_LIMIT, read_log_tail, remove_tunnel_logs, rotated_log_path, tunnel_log_path,
+    };
+    use std::path::{Path, PathBuf};
+
+    /// 每个用例独占的临时目录。
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ssh-forward-main-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+        dir
+    }
+
+    /// 写入 `count` 行固定形状的日志，每行 `line-<四位序号>\n`（10 字节）。
+    fn write_numbered_lines(path: &Path, count: usize) {
+        let content: String = (0..count)
+            .map(|index| format!("line-{index:04}\n"))
+            .collect();
+        std::fs::write(path, content).expect("写入日志失败");
+    }
+
+    /// 文件远大于读取窗口时，只返回尾部 [`DIAGNOSTIC_LINE_LIMIT`] 行。
+    #[test]
+    fn reads_only_the_tail_when_the_file_exceeds_the_window() {
+        let dir = temp_dir("tail-large");
+        let path = dir.join("tunnel.log");
+        // 10000 行 × 10 B = 100 KB，超过 64 KB 的初始窗口。
+        write_numbered_lines(&path, 10_000);
+
+        let tail = read_log_tail(&path).expect("读取尾部失败");
+        let lines: Vec<&str> = tail.lines().collect();
+
+        assert_eq!(lines.len(), DIAGNOSTIC_LINE_LIMIT, "应恰好返回行数上限");
+        assert_eq!(
+            lines.first().copied(),
+            Some("line-9800"),
+            "起点应为倒数第 200 行"
+        );
+        assert_eq!(
+            lines.last().copied(),
+            Some("line-9999"),
+            "末行应为文件最后一行"
+        );
+    }
+
+    /// 文件小于窗口时返回全部内容，且不因「从中间截断」而丢首行。
+    #[test]
+    fn returns_every_line_when_the_file_is_smaller_than_the_window() {
+        let dir = temp_dir("tail-small");
+        let path = dir.join("tunnel.log");
+        write_numbered_lines(&path, 10);
+
+        let tail = read_log_tail(&path).expect("读取尾部失败");
+        let lines: Vec<&str> = tail.lines().collect();
+
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines.first().copied(), Some("line-0000"));
+        assert_eq!(lines.last().copied(), Some("line-0009"));
+    }
+
+    /// 行很长时初始窗口装不下 200 行，必须扩张窗口直到够行。
+    ///
+    /// 这条用例锁住的是「窗口读取不得改变返回行数契约」。
+    #[test]
+    fn expands_the_window_when_lines_are_very_long() {
+        let dir = temp_dir("tail-long-lines");
+        let path = dir.join("tunnel.log");
+        let payload = "y".repeat(995);
+        let content: String = (0..300)
+            .map(|index| format!("{payload}{index:04}\n"))
+            .collect();
+        std::fs::write(&path, content).expect("写入日志失败");
+
+        let tail = read_log_tail(&path).expect("读取尾部失败");
+        let lines: Vec<&str> = tail.lines().collect();
+
+        assert_eq!(
+            lines.len(),
+            DIAGNOSTIC_LINE_LIMIT,
+            "64 KB 窗口只够约 65 行，必须扩张后才能返回 200 行"
+        );
+        assert!(
+            lines.last().expect("末行").ends_with("0299"),
+            "末行应为第 299 行"
+        );
+    }
+
+    /// 窗口边界落在多字节字符中间时，不得产出替换字符。
+    ///
+    /// 若按 `String` 直接切片，这里会因 UTF-8 边界错误而失败或产生 U+FFFD；
+    /// 实现改为「按字节读取 + 丢弃首个不完整行」，两个问题一并规避。
+    #[test]
+    fn does_not_split_multibyte_characters_at_the_window_boundary() {
+        let dir = temp_dir("tail-multibyte");
+        let path = dir.join("tunnel.log");
+        // 每行 12 字节：`日志`（6 B）+ `-`（1 B）+ 四位序号（4 B）+ 换行（1 B）。
+        // 12 不是 65536 的因数，因此窗口边界必然落在行内，且可能落在汉字中间。
+        let content: String = (0..6000)
+            .map(|index| format!("日志-{index:04}\n"))
+            .collect();
+        std::fs::write(&path, content).expect("写入日志失败");
+
+        let tail = read_log_tail(&path).expect("读取尾部失败");
+        let lines: Vec<&str> = tail.lines().collect();
+
+        assert!(
+            !tail.contains('\u{FFFD}'),
+            "出现替换字符说明切到了多字节字符中间"
+        );
+        assert_eq!(lines.len(), DIAGNOSTIC_LINE_LIMIT);
+        assert_eq!(lines.last().copied(), Some("日志-5999"));
+    }
+
+    /// 文件不存在时返回 `None`，而不是 panic。
+    #[test]
+    fn missing_file_yields_none() {
+        let dir = temp_dir("tail-missing");
+        assert!(read_log_tail(&dir.join("nope.log")).is_none());
+    }
+
+    /// 删除隧道时同时清理当前日志与轮转后的旧日志，且不动目录中的其他文件。
+    #[test]
+    fn removes_both_current_and_rotated_logs() {
+        let dir = temp_dir("cleanup");
+        let config_path = dir.join("config.json");
+        let tunnel_id = "11111111-1111-1111-1111-111111111111";
+        let log = tunnel_log_path(&config_path, tunnel_id);
+        std::fs::create_dir_all(log.parent().expect("日志应有父目录")).expect("创建 logs 失败");
+        std::fs::write(&log, "current").expect("写入当前日志失败");
+        std::fs::write(rotated_log_path(&log), "rotated").expect("写入旧日志失败");
+        // 同目录下的无关文件必须保留。
+        let unrelated = dir.join("known_hosts");
+        std::fs::write(&unrelated, "keep-me").expect("写入无关文件失败");
+
+        remove_tunnel_logs(&config_path, tunnel_id);
+
+        assert!(!log.exists(), "当前日志应被删除");
+        assert!(!rotated_log_path(&log).exists(), "轮转后的旧日志应被删除");
+        assert!(unrelated.exists(), "无关文件不得被删除");
+    }
+
+    /// 日志本就不存在时，清理不得 panic——它必须对「删隧道」这一操作完全透明。
+    #[test]
+    fn removing_logs_is_silent_when_files_are_absent() {
+        let dir = temp_dir("cleanup-absent");
+        let config_path = dir.join("config.json");
+
+        remove_tunnel_logs(&config_path, "no-such-tunnel");
+
+        assert!(!tunnel_log_path(&config_path, "no-such-tunnel").exists());
+    }
+}
+
+#[cfg(test)]
+mod browser_url_tests {
+    use super::{ensure_openable_url, local_browser_url};
+    use ssh_forward_config::{Endpoint, Tunnel, TunnelType};
+
+    fn tunnel(host: &str, port: u16) -> Tunnel {
+        Tunnel {
+            id: "11111111-1111-1111-1111-111111111111".into(),
+            name: "web".into(),
+            host_id: "host-1".into(),
+            kind: TunnelType::Local,
+            local: Endpoint {
+                host: host.into(),
+                port,
+            },
+            remote: Some(Endpoint {
+                host: "example.test".into(),
+                port: 80,
+            }),
+            gateway_ports: false,
+            custom_options: Vec::new(),
+            auto_start: false,
+            auto_reconnect: true,
+            auto_open_browser: false,
+            enabled: true,
+        }
+    }
+
+    /// scheme 白名单是「不得打开任意 scheme」这一不变量的可测试表达。
+    #[test]
+    fn accepts_http_and_https() {
+        assert!(ensure_openable_url("http://127.0.0.1:8080").is_ok());
+        assert!(ensure_openable_url("https://127.0.0.1:8080").is_ok());
+        assert!(
+            ensure_openable_url("HTTP://127.0.0.1:8080").is_ok(),
+            "scheme 比较应忽略大小写"
+        );
+    }
+
+    /// 白名单之外的一切 scheme 都必须被拒绝。
+    #[test]
+    fn rejects_schemes_outside_the_whitelist() {
+        for url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "ftp://127.0.0.1",
+            "javascript://127.0.0.1",
+            "ms-msdt://127.0.0.1",
+            "vbscript://127.0.0.1",
+        ] {
+            assert!(
+                ensure_openable_url(url).is_err(),
+                "{url} 不应被允许交给系统打开"
+            );
+        }
+    }
+
+    /// 缺少 `://` 的输入无法判定 scheme，必须拒绝而非放行。
+    #[test]
+    fn rejects_urls_without_a_scheme_separator() {
+        for url in ["127.0.0.1:8080", "cmd:/c calc", "", "://"] {
+            assert!(
+                ensure_openable_url(url).is_err(),
+                "{url} 缺少 scheme，应被拒绝"
+            );
+        }
+    }
+
+    /// 本批**刻意未**放宽绑定地址白名单（那是 D5 的范围）。
+    ///
+    /// 该用例是 D5 的现状记录测试：D5 落地后它会失败，届时需连同
+    /// `local_browser_url` 一起改写为新的预期行为。
+    #[test]
+    fn local_browser_url_still_restricts_the_bind_address() {
+        for host in ["0.0.0.0", "192.168.1.10", "::", "[::1]"] {
+            assert!(
+                local_browser_url(&tunnel(host, 8080)).is_err(),
+                "{host} 当前不应被允许用浏览器打开"
+            );
+        }
+    }
+
+    #[test]
+    fn local_browser_url_builds_http_for_loopback() {
+        assert_eq!(
+            local_browser_url(&tunnel("127.0.0.1", 8080)).expect("应允许"),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            local_browser_url(&tunnel("localhost", 9090)).expect("应允许"),
+            "http://localhost:9090"
+        );
+    }
+
+    /// 端到端串联：`local_browser_url` 的产物必须能通过 scheme 白名单。
+    #[test]
+    fn loopback_url_passes_the_scheme_whitelist() {
+        let url = local_browser_url(&tunnel("127.0.0.1", 8080)).expect("应允许");
+        assert!(ensure_openable_url(&url).is_ok());
+    }
 }

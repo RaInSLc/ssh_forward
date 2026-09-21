@@ -25,7 +25,7 @@ permissions:
 jobs:
   # 轻量作业：不需要 Rust 工具链，秒级完成，因此独立于平台矩阵先跑。
   version:
-    name: 版本号一致性
+    name: 静态一致性检查（版本号 / IPC 契约）
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -38,6 +38,12 @@ jobs:
 
       - name: Check version consistency
         run: node scripts/check-version.mjs
+
+      # 前端以字符串命令名调用 Tauri，与 Rust 的 generate_handler! 之间没有编译期约束
+      # （二次设计评审 A2）。本步骤做双向差集检查，让「命令重命名」在 CI 上失败，
+      # 而不是等到运行时才以「命令不存在」暴露。
+      - name: Check IPC contract
+        run: node scripts/check-ipc-contract.mjs
 
   # 平台矩阵取产品实际支持的两个平台（与 release.yml 的打包矩阵一致）。
   # 不纳入 Linux：产品不发布 Linux 产物，且 Tauri 在 Linux 上还需额外安装

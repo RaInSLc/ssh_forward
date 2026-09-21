@@ -19,4 +19,11 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+# Win32_UI_Shell 提供 ShellExecuteW（E1：替代 `cmd /C start`，消除 shell 解析层）；
+# Win32_UI_WindowsAndMessaging 提供 SW_SHOWNORMAL。二者缺一即编译失败。
+windows-sys = { version = "0.61", features = [
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
